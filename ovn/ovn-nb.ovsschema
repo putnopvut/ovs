@@ -1,7 +1,7 @@
 {
     "name": "OVN_Northbound",
     "version": "5.8.0",
-    "cksum": "2812300190 16766",
+    "cksum": "4012319930 17144",
     "tables": {
         "NB_Global": {
             "columns": {
@@ -60,7 +60,14 @@
         "Logical_Switch_Port": {
             "columns": {
                 "name": {"type": "string"},
-                "type": {"type": "string"},
+                "type": {
+                    "type": {"key": {"type": "string",
+                             "enum": ["set", ["",
+                                              "localnet",
+                                              "localport",
+                                              "l2gateway",
+                                              "router",
+                                              "vtep"]]}}},
                 "options": {
                      "type": {"key": "string",
                               "value": "string",

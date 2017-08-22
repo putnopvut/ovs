@@ -1962,6 +1962,10 @@ ovn_port_update_sbrec(struct northd_context *ctx,
             }
             sbrec_port_binding_set_options(op->sb, &options);
             smap_destroy(&options);
+            if (!ovn_is_known_nb_lsp_type(op->nbsp->type)) {
+                VLOG_WARN("Unknown port type '%s' set on logical switch '%s'. "
+                          "Using anyway.", op->nbsp->type, op->nbsp->name);
+            }
             sbrec_port_binding_set_type(op->sb, op->nbsp->type);
         } else {
             const char *chassis = NULL;
