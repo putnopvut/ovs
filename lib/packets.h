@@ -976,6 +976,7 @@ BUILD_ASSERT_DECL(ND_PREFIX_OPT_LEN == sizeof(struct ovs_nd_prefix_opt));
 
 /* Neighbor Discovery option: MTU. */
 #define ND_MTU_OPT_LEN 8
+#define ND_MTU_DEFAULT 0
 struct ovs_nd_mtu_opt {
     uint8_t  type;      /* ND_OPT_MTU */
     uint8_t  len;       /* Always 1. */
@@ -1014,6 +1015,12 @@ BUILD_ASSERT_DECL(RA_MSG_LEN == sizeof(struct ovs_ra_msg));
 
 #define ND_RA_MANAGED_ADDRESS 0x80
 #define ND_RA_OTHER_CONFIG    0x40
+
+/* Defaults based on MaxRtrInterval and MinRtrInterval from RFC 4861 section
+ * 6.2.1
+ */
+#define ND_RA_MAX_INTERVAL_DEFAULT 600
+#define ND_RA_MIN_INTERVAL_DEFAULT(max) ((max) >= 9 ? (max) / 3 : (max) * 3 / 4)
 
 /*
  * Use the same struct for MLD and MLD2, naming members as the defined fields in

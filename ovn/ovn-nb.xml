@@ -1369,6 +1369,25 @@
         Per RFC 2460, the mtu value is recommended no less than 1280, so
         any mtu value less than 1280 will be considered as no MTU Option.
       </column>
+
+      <column name="ipv6_ra_configs" key="send_periodic">
+        Should the router port send periodic router advertisements? If set to
+        true, then this router interface will send router advertisements
+        out periodically. The default is false.
+      </column>
+
+      <column name="ipv6_ra_configs" key="max_interval">
+        The maximum number of seconds to wait between sending periodic router
+        advertisements. This option has no effect if the "send_periodic" value
+        is set to false. The default is 600.
+      </column>
+
+      <column name="ipv6_ra_configs" key="min_interval">
+        The minimum number of seconds to wait between sending periodic router
+        advertisements. This option has no effect if the "send_periodic" value
+        is set to "false". The default is 0.33 * max_interval. If max_interval
+        is set to its default, then min_interval will be 200.
+      </column>
     </group>
 
     <group title="Options">
