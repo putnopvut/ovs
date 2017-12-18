@@ -3249,11 +3249,6 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
             struct ds match = DS_EMPTY_INITIALIZER;
             struct ds actions = DS_EMPTY_INITIALIZER;
 
-            /* XXX Need to support "reject", treat it as "drop;" for now. */
-            if (!strcmp(acl->action, "reject")) {
-                VLOG_INFO("reject is not a supported action");
-            }
-
             /* The implementation of "drop" differs if stateful ACLs are in
              * use for this datapath.  In that case, the actions differ
              * depending on whether the connection was previously committed
@@ -3267,7 +3262,16 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
                               acl->match);
                 ds_clear(&actions);
                 build_acl_log(&actions, acl);
-                ds_put_cstr(&actions, "/* drop */");
+                if (!strcmp(acl->action, "reject")) {
+                    ds_put_format(&match, " && ip4");
+                    ds_put_cstr(&actions,
+                                "icmp4 { "
+                                "flags.loopback = 1; inport = outport; "
+                                "next(pipeline=ingress,table=0); "
+                                "}; ");
+                } else {
+                    ds_put_cstr(&actions, "/* drop */");
+                }
                 ovn_lflow_add_with_hint(lflows, od, stage,
                                         acl->priority + OVN_ACL_PRI_OFFSET,
                                         ds_cstr(&match), ds_cstr(&actions),
@@ -3290,23 +3294,42 @@ build_acls(struct ovn_datapath *od, struct hmap *lflows)
                               acl->match);
                 ds_put_cstr(&actions, "ct_commit(ct_label=1/1); ");
                 build_acl_log(&actions, acl);
-                ds_put_cstr(&actions, "/* drop */");
+                if (!strcmp(acl->action, "reject")) {
+                    ds_put_format(&match, " && ip4");
+                    ds_put_cstr(&actions,
+                                "icmp4 { "
+                                "flags.loopback = 1; inport = outport; "
+                                "next(pipeline=ingress,table=0); "
+                                "}; ");
+                } else {
+                    ds_put_cstr(&actions, "/* drop */");
+                }
                 ovn_lflow_add_with_hint(lflows, od, stage,
                                         acl->priority + OVN_ACL_PRI_OFFSET,
                                         ds_cstr(&match), ds_cstr(&actions),
                                         stage_hint);
-
             } else {
-                /* There are no stateful ACLs in use on this datapath,
-                 * so a "drop" ACL is simply the "drop" logical flow action
-                 * in all cases. */
+                ds_clear(&match);
                 ds_clear(&actions);
                 build_acl_log(&actions, acl);
-                ds_put_cstr(&actions, "/* drop */");
-                ovn_lflow_add_with_hint(lflows, od, stage,
-                                        acl->priority + OVN_ACL_PRI_OFFSET,
-                                        acl->match, ds_cstr(&actions),
-                                        stage_hint);
+                if (!strcmp(acl->action, "reject")) {
+                    ds_put_format(&match, "(%s) && ip4", acl->match);
+                    ds_put_cstr(&actions,
+                                "icmp4 { "
+                                "flags.loopback = 1; inport = outport; "
+                                "next(pipeline=ingress,table=0); "
+                                "}; ");
+                } else {
+                    /* There are no stateful ACLs in use on this datapath,
+                     * so a "drop" ACL is simply the "drop" logical flow action
+                     * in all cases. */
+                    ds_put_cstr(&match, acl->match);
+                    ds_put_cstr(&actions, "/* drop */");
+               }
+               ovn_lflow_add_with_hint(lflows, od, stage,
+                                       acl->priority + OVN_ACL_PRI_OFFSET,
+                                       ds_cstr(&match), ds_cstr(&actions),
+                                       stage_hint);
             }
             ds_destroy(&match);
             ds_destroy(&actions);
