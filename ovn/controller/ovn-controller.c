@@ -56,6 +56,9 @@
 #include "stream.h"
 #include "unixctl.h"
 #include "util.h"
+#include "timeval.h"
+#include "timer.h"
+#include "performance.h"
 
 VLOG_DEFINE_THIS_MODULE(main);
 
@@ -65,6 +68,8 @@ static unixctl_cb_func inject_pkt;
 
 #define DEFAULT_BRIDGE_NAME "br-int"
 #define DEFAULT_PROBE_INTERVAL_MSEC 5000
+
+#define CONTROLLER_LOOP_PERFORMANCE_NAME "ovn-controller-loop"
 
 static void update_probe_interval(struct controller_ctx *,
                                   const char *ovnsb_remote);
@@ -637,8 +642,10 @@ main(int argc, char *argv[])
     unixctl_command_register("inject-pkt", "MICROFLOW", 1, 1, inject_pkt,
                              &pending_pkt);
 
+    performance_create(CONTROLLER_LOOP_PERFORMANCE_NAME, PERF_MS);
     /* Main loop. */
     exiting = false;
+    unsigned int our_seqno = 0;
     while (!exiting) {
         /* Check OVN SB database. */
         char *new_ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
@@ -656,6 +663,12 @@ main(int argc, char *argv[])
             .ovnsb_idl = ovnsb_idl_loop.idl,
             .ovnsb_idl_txn = ovsdb_idl_loop_run(&ovnsb_idl_loop),
         };
+
+        if (our_seqno != ovsdb_idl_get_seqno(ctx.ovnsb_idl)) {
+            performance_start_sample(CONTROLLER_LOOP_PERFORMANCE_NAME,
+                                     time_msec());
+            our_seqno = ovsdb_idl_get_seqno(ctx.ovnsb_idl);
+        }
 
         update_probe_interval(&ctx, ovnsb_remote);
 
@@ -726,6 +739,9 @@ main(int argc, char *argv[])
                     ofctrl_put(&flow_table, &pending_ct_zones,
                                get_nb_cfg(ctx.ovnsb_idl));
 
+                    performance_end_sample(CONTROLLER_LOOP_PERFORMANCE_NAME,
+                                           time_msec());
+
                     hmap_destroy(&flow_table);
                 }
                 if (ctx.ovnsb_idl_txn) {
@@ -790,6 +806,7 @@ main(int argc, char *argv[])
             ofctrl_wait();
             pinctrl_wait(&ctx);
         }
+
         ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
 
         if (ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop) == 1) {
