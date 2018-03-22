@@ -814,6 +814,35 @@ flow_output_sb_port_binding_handler(struct engine_node *node)
     return true;
 }
 
+static bool
+flow_output_sb_multicast_group_handler(struct engine_node *node)
+{
+    struct controller_ctx *ctx = (struct controller_ctx *)node->context;
+    struct ed_type_runtime_data *data =
+        (struct ed_type_runtime_data *)engine_get_input(
+                "runtime_data", node)->data;
+    struct hmap *local_datapaths = data->local_datapaths;
+    const struct ovsrec_bridge *br_int = get_br_int(ctx);
+
+    const char *chassis_id = get_chassis_id(ctx->ovs_idl);
+
+
+    const struct sbrec_chassis *chassis = NULL;
+    if (chassis_id) {
+        chassis = get_chassis(ctx->ovnsb_idl, chassis_id);
+    }
+
+    ovs_assert(br_int && chassis);
+
+    enum mf_field_id mff_ovn_geneve = ofctrl_get_mf_field_id();
+    physical_handle_mc_group_changes(ctx, mff_ovn_geneve,
+                                     chassis, ctx->ct_zones,
+                                     local_datapaths);
+    node->changed = true;
+    return true;
+
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -946,7 +975,7 @@ main(int argc, char *argv[])
     engine_add_input(&en_flow_output, &en_sb_chassis, NULL);
     engine_add_input(&en_flow_output, &en_sb_encap, NULL);
     engine_add_input(&en_flow_output, &en_sb_address_set, NULL);
-    engine_add_input(&en_flow_output, &en_sb_multicast_group, NULL);
+    engine_add_input(&en_flow_output, &en_sb_multicast_group, flow_output_sb_multicast_group_handler);
     engine_add_input(&en_flow_output, &en_sb_datapath_binding, NULL);
     engine_add_input(&en_flow_output, &en_sb_port_binding, flow_output_sb_port_binding_handler);
     engine_add_input(&en_flow_output, &en_sb_mac_binding, NULL);
