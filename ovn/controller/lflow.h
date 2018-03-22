@@ -69,9 +69,17 @@ void lflow_run(struct controller_ctx *,
                struct ovn_extend_table *group_table,
                struct ovn_extend_table *meter_table,
                const struct shash *addr_sets,
-               struct hmap *flow_table,
                struct sset *active_tunnels,
                struct sset *local_lport_ids);
+void lflow_handle_changed_flows(struct controller_ctx *ctx,
+                  const struct sbrec_chassis *chassis,
+                  const struct chassis_index *chassis_index,
+                  const struct hmap *local_datapaths,
+                  struct ovn_extend_table *group_table,
+                  struct ovn_extend_table *extend_table,
+                  const struct shash *addr_sets,
+                  struct sset *active_tunnels,
+                  struct sset *local_lport_ids);
 void lflow_destroy(void);
 
 #endif /* ovn/lflow.h */

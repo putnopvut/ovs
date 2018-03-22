@@ -659,7 +659,6 @@ runtime_data_run(struct engine_node *node)
 }
 
 struct ed_type_flow_output {
-    struct hmap *flow_table;
     struct ovn_extend_table *group_table;
     struct ovn_extend_table *meter_table;
 };
@@ -688,26 +687,23 @@ flow_output_run(struct engine_node *node)
 
     ovs_assert(br_int && chassis);
 
-    struct hmap *flow_table =
-        ((struct ed_type_flow_output *)node->data)->flow_table;
-    struct ovn_extend_table *group_table =
-        ((struct ed_type_flow_output *)node->data)->group_table;
-    struct ovn_extend_table *meter_table =
-        ((struct ed_type_flow_output *)node->data)->meter_table;
-
     if (ctx->ovs_idl_txn) {
         static bool first_run = true;
         if (first_run) {
             first_run = false;
         } else {
-            hmap_clear(flow_table);
+            ofctrl_flow_table_clear();
         }
+        struct ovn_extend_table *group_table =
+            ((struct ed_type_flow_output *)node->data)->group_table;
+        struct ovn_extend_table *meter_table =
+            ((struct ed_type_flow_output *)node->data)->meter_table;
         /* requires ctx->ovs_idl_txn */
         commit_ct_zones(br_int, ctx->pending_ct_zones);
 
         lflow_run(ctx, chassis,
                   chassis_index, local_datapaths, group_table,
-                  meter_table, addr_sets, flow_table, active_tunnels,
+                  meter_table, addr_sets, active_tunnels,
                   local_lport_ids);
 
         bfd_run(ctx, br_int, chassis, local_datapaths,
@@ -716,10 +712,47 @@ flow_output_run(struct engine_node *node)
 
         physical_run(ctx, mff_ovn_geneve,
                      br_int, chassis, ctx->ct_zones,
-                     flow_table, local_datapaths, local_lports,
+                     local_datapaths, local_lports,
                      chassis_index, active_tunnels);
     }
     node->changed = true;
+}
+
+static bool
+flow_output_sb_logical_flow_handler(struct engine_node *node)
+{
+    struct controller_ctx *ctx = (struct controller_ctx *)node->context;
+    struct ed_type_runtime_data *data =
+        (struct ed_type_runtime_data *)engine_get_input(
+                "runtime_data", node)->data;
+    struct hmap *local_datapaths = data->local_datapaths;
+    struct sset *local_lport_ids = data->local_lport_ids;
+    struct sset *active_tunnels = data->active_tunnels;
+    struct chassis_index *chassis_index = data->chassis_index;
+    struct shash *addr_sets = data->addr_sets;
+    const struct ovsrec_bridge *br_int = get_br_int(ctx);
+
+    const char *chassis_id = get_chassis_id(ctx->ovs_idl);
+
+
+    const struct sbrec_chassis *chassis = NULL;
+    if (chassis_id) {
+        chassis = get_chassis(ctx->ovnsb_idl, chassis_id);
+    }
+
+    ovs_assert(br_int && chassis);
+
+    // TODO: move group_table from node data to ofctrl module data
+    struct ovn_extend_table *group_table =
+        ((struct ed_type_flow_output *)node->data)->group_table;
+    struct ovn_extend_table *meter_table =
+        ((struct ed_type_flow_output *)node->data)->meter_table;
+    lflow_handle_changed_flows(ctx, chassis,
+              chassis_index, local_datapaths, group_table, meter_table,
+              addr_sets, active_tunnels, local_lport_ids);
+
+    node->changed = true;
+    return true;
 }
 
 int
@@ -825,10 +858,7 @@ main(int argc, char *argv[])
         .addr_sets = &addr_sets
     };
 
-    struct hmap flow_table = HMAP_INITIALIZER(&flow_table);
-
     struct ed_type_flow_output ed_flow_output = {
-        .flow_table = &flow_table,
         .group_table = &group_table,
         .meter_table = &meter_table
     };
@@ -861,7 +891,7 @@ main(int argc, char *argv[])
     engine_add_input(&en_flow_output, &en_sb_datapath_binding, NULL);
     engine_add_input(&en_flow_output, &en_sb_port_binding, NULL);
     engine_add_input(&en_flow_output, &en_sb_mac_binding, NULL);
-    engine_add_input(&en_flow_output, &en_sb_logical_flow, NULL);
+    engine_add_input(&en_flow_output, &en_sb_logical_flow, flow_output_sb_logical_flow_handler);
     engine_add_input(&en_flow_output, &en_sb_dhcp_options, NULL);
     engine_add_input(&en_flow_output, &en_sb_dhcpv6_options, NULL);
     engine_add_input(&en_flow_output, &en_sb_dns, NULL);
@@ -878,6 +908,7 @@ main(int argc, char *argv[])
 
     uint64_t engine_run_id = 0;
     uint64_t old_engine_run_id = 0;
+
     /* Main loop. */
     exiting = false;
     while (!exiting) {
@@ -913,18 +944,12 @@ main(int argc, char *argv[])
             ofctrl_run(br_int, &pending_ct_zones);
             patch_run(&ctx, br_int, chassis);
             encaps_run(&ctx, br_int, chassis_id);
-
-            if (ofctrl_can_put()) {
-                engine_run(&en_flow_output, ++engine_run_id);
-                if (en_flow_output.changed) {
-                    ofctrl_put(&flow_table, &pending_ct_zones,
-                               get_nb_cfg(ctx.ovnsb_idl));
-                }
-            }
-
+            engine_run(&en_flow_output, ++engine_run_id);
+            ofctrl_put(&pending_ct_zones,
+                       get_nb_cfg(ctx.ovnsb_idl),
+                       en_flow_output.changed);
             pinctrl_run(&ctx, br_int, chassis, &chassis_index,
                         &local_datapaths, &active_tunnels);
-
         }
         if (old_engine_run_id == engine_run_id ||
                 !ctx.ovnsb_idl_txn || !ctx.ovs_idl_txn) {
@@ -935,8 +960,6 @@ main(int argc, char *argv[])
             engine_set_force_recompute(false);
         }
 
-        // TODO: is it possible that an update to SB is missed
-        // because of !ctx.ovnsb_idl_txn while ofctrl_run happened?
         if (ctx.ovnsb_idl_txn) {
             int64_t cur_cfg = ofctrl_get_cur_cfg();
             if (cur_cfg && cur_cfg != chassis->nb_cfg) {
@@ -1010,8 +1033,6 @@ main(int argc, char *argv[])
         free(cur_node);
     }
     hmap_destroy(&local_datapaths);
-
-    hmap_destroy(&flow_table);
 
     /* It's time to exit.  Clean up the databases. */
     bool done = false;

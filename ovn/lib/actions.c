@@ -1059,7 +1059,8 @@ encode_CT_LB(const struct ovnact_ct_lb *cl,
                       recirc_table, zone_reg);
     }
 
-    table_id = ovn_extend_table_assign_id(ep->group_table, &ds);
+    table_id = ovn_extend_table_assign_id(ep->group_table, &ds,
+                                          ep->lflow_uuid);
     ds_destroy(&ds);
     if (table_id == EXT_TABLE_ID_INVALID) {
         return;
@@ -2178,7 +2179,8 @@ encode_SET_METER(const struct ovnact_set_meter *cl,
                       cl->rate);
     }
 
-    table_id = ovn_extend_table_assign_id(ep->meter_table, &ds);
+    table_id = ovn_extend_table_assign_id(ep->meter_table, &ds,
+                                          ep->lflow_uuid);
     if (table_id == EXT_TABLE_ID_INVALID) {
         ds_destroy(&ds);
         return;
