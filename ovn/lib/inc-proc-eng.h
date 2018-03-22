@@ -47,6 +47,9 @@ struct engine_node {
 void
 engine_run(struct engine_node *node, uint64_t run_id);
 
+bool
+engine_need_run(struct engine_node *node);
+
 static inline struct engine_node *
 engine_get_input(const char *input_name, struct engine_node *node)
 {
