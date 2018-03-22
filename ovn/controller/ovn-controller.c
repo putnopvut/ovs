@@ -573,6 +573,19 @@ create_ovnsb_indexes(struct ovsdb_idl *ovnsb_idl)
                                OVSDB_INDEX_ASC, NULL);
 }
 
+ENGINE_FUNC_SB(chassis);
+ENGINE_FUNC_SB(encap);
+ENGINE_FUNC_SB(address_set);
+ENGINE_FUNC_SB(multicast_group);
+ENGINE_FUNC_SB(datapath_binding);
+ENGINE_FUNC_SB(port_binding);
+ENGINE_FUNC_SB(mac_binding);
+ENGINE_FUNC_SB(logical_flow);
+ENGINE_FUNC_SB(dhcp_options);
+ENGINE_FUNC_SB(dhcpv6_options);
+ENGINE_FUNC_SB(dns);
+ENGINE_FUNC_SB(gateway_chassis);
+
 struct ed_type_runtime_data {
     struct chassis_index *chassis_index;
     struct hmap *local_datapaths;
@@ -780,6 +793,8 @@ main(int argc, char *argv[])
     ctx.pending_ct_zones = &pending_ct_zones;
     ctx.ct_zones = &ct_zones;
 
+    // TODO: move below runtime_data alloc+init into engine_node run function,
+    // and free them upon exit.
     /* Contains "struct local_datapath" nodes. */
     struct hmap local_datapaths = HMAP_INITIALIZER(&local_datapaths);
 
@@ -813,10 +828,36 @@ main(int argc, char *argv[])
         .meter_table = &meter_table
     };
 
+    ENGINE_NODE_SB(chassis, "chassis");
+    ENGINE_NODE_SB(encap, "encap");
+    ENGINE_NODE_SB(address_set, "address_set");
+    ENGINE_NODE_SB(multicast_group, "multicast_group");
+    ENGINE_NODE_SB(datapath_binding, "datapath_binding");
+    ENGINE_NODE_SB(port_binding, "port_binding");
+    ENGINE_NODE_SB(mac_binding, "mac_binding");
+    ENGINE_NODE_SB(logical_flow, "logical_flow");
+    ENGINE_NODE_SB(dhcp_options, "dhcp_options");
+    ENGINE_NODE_SB(dhcpv6_options, "dhcpv6_options");
+    ENGINE_NODE_SB(dns, "dns");
+    ENGINE_NODE_SB(gateway_chassis, "gateway_chassis");
+
     ENGINE_NODE(runtime_data, "runtime_data");
     ENGINE_NODE(flow_output, "flow_output");
 
     engine_add_input(&en_flow_output, &en_runtime_data, NULL);
+
+    engine_add_input(&en_flow_output, &en_sb_chassis, NULL);
+    engine_add_input(&en_flow_output, &en_sb_encap, NULL);
+    engine_add_input(&en_flow_output, &en_sb_address_set, NULL);
+    engine_add_input(&en_flow_output, &en_sb_multicast_group, NULL);
+    engine_add_input(&en_flow_output, &en_sb_datapath_binding, NULL);
+    engine_add_input(&en_flow_output, &en_sb_port_binding, NULL);
+    engine_add_input(&en_flow_output, &en_sb_mac_binding, NULL);
+    engine_add_input(&en_flow_output, &en_sb_logical_flow, NULL);
+    engine_add_input(&en_flow_output, &en_sb_dhcp_options, NULL);
+    engine_add_input(&en_flow_output, &en_sb_dhcpv6_options, NULL);
+    engine_add_input(&en_flow_output, &en_sb_dns, NULL);
+    engine_add_input(&en_flow_output, &en_sb_gateway_chassis, NULL);
 
     uint64_t engine_run_id = 0;
     /* Main loop. */
