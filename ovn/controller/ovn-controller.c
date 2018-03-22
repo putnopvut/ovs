@@ -586,6 +586,9 @@ ENGINE_FUNC_SB(dhcpv6_options);
 ENGINE_FUNC_SB(dns);
 ENGINE_FUNC_SB(gateway_chassis);
 
+ENGINE_FUNC_OVS(port);
+ENGINE_FUNC_OVS(interface);
+
 struct ed_type_runtime_data {
     struct chassis_index *chassis_index;
     struct hmap *local_datapaths;
@@ -641,6 +644,7 @@ runtime_data_run(struct engine_node *node)
     ovs_assert(chassis);
 
     bfd_calculate_active_tunnels(br_int, active_tunnels);
+    /* requires ctx->ovnsb_idl_txn */
     binding_run(ctx, br_int, chassis,
                 chassis_index, active_tunnels, local_datapaths,
                 local_lports, local_lport_ids);
@@ -698,6 +702,7 @@ flow_output_run(struct engine_node *node)
         } else {
             hmap_clear(flow_table);
         }
+        /* requires ctx->ovs_idl_txn */
         commit_ct_zones(br_int, ctx->pending_ct_zones);
 
         lflow_run(ctx, chassis,
@@ -841,6 +846,9 @@ main(int argc, char *argv[])
     ENGINE_NODE_SB(dns, "dns");
     ENGINE_NODE_SB(gateway_chassis, "gateway_chassis");
 
+    ENGINE_NODE_OVS(port, "ovs_table_port");
+    ENGINE_NODE_OVS(interface, "ovs_table_interface");
+
     ENGINE_NODE(runtime_data, "runtime_data");
     ENGINE_NODE(flow_output, "flow_output");
 
@@ -859,10 +867,21 @@ main(int argc, char *argv[])
     engine_add_input(&en_flow_output, &en_sb_dns, NULL);
     engine_add_input(&en_flow_output, &en_sb_gateway_chassis, NULL);
 
+    engine_add_input(&en_runtime_data, &en_ovs_port, NULL);
+    engine_add_input(&en_runtime_data, &en_ovs_interface, NULL);
+
+    engine_add_input(&en_runtime_data, &en_sb_chassis, NULL);
+    engine_add_input(&en_runtime_data, &en_sb_address_set, NULL);
+    engine_add_input(&en_runtime_data, &en_sb_datapath_binding, NULL);
+    engine_add_input(&en_runtime_data, &en_sb_port_binding, NULL);
+    engine_add_input(&en_runtime_data, &en_sb_gateway_chassis, NULL);
+
     uint64_t engine_run_id = 0;
+    uint64_t old_engine_run_id = 0;
     /* Main loop. */
     exiting = false;
     while (!exiting) {
+        old_engine_run_id = engine_run_id;
         /* Check OVN SB database. */
         char *new_ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
         if (strcmp(ovnsb_remote, new_ovnsb_remote)) {
@@ -897,15 +916,27 @@ main(int argc, char *argv[])
 
             if (ofctrl_can_put()) {
                 engine_run(&en_flow_output, ++engine_run_id);
-
-                ofctrl_put(&flow_table, &pending_ct_zones,
-                           get_nb_cfg(ctx.ovnsb_idl));
+                if (en_flow_output.changed) {
+                    ofctrl_put(&flow_table, &pending_ct_zones,
+                               get_nb_cfg(ctx.ovnsb_idl));
+                }
             }
+
             pinctrl_run(&ctx, br_int, chassis, &chassis_index,
                         &local_datapaths, &active_tunnels);
 
         }
+        if (old_engine_run_id == engine_run_id ||
+                !ctx.ovnsb_idl_txn || !ctx.ovs_idl_txn) {
+            VLOG_DBG("engine did not run, force recompute next time: "
+                     "br_int %p, chassis %p", br_int, chassis);
+            engine_set_force_recompute(true);
+        } else {
+            engine_set_force_recompute(false);
+        }
 
+        // TODO: is it possible that an update to SB is missed
+        // because of !ctx.ovnsb_idl_txn while ofctrl_run happened?
         if (ctx.ovnsb_idl_txn) {
             int64_t cur_cfg = ofctrl_get_cur_cfg();
             if (cur_cfg && cur_cfg != chassis->nb_cfg) {
