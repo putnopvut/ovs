@@ -217,7 +217,7 @@ Docker network plugins for OVN.
 %setup -q
 
 %build
-%configure OVS_CFLAGS="-fno-omit-frame-pointer" CFLAGS="-g"\
+%configure OVS_CFLAGS="-fno-omit-frame-pointer" CFLAGS="-g -fPIC"\
 %if %{with libcapng}
 	--enable-libcapng \
 %else
