@@ -3621,6 +3621,8 @@ cmd_set_ssl(struct ctl_context *ctx)
     const struct nbrec_nb_global *nb_global = nbrec_nb_global_first(ctx->idl);
     const struct nbrec_ssl *ssl = nbrec_ssl_first(ctx->idl);
 
+    VLOG_INFO("Setting ssl stuff..");
+
     nbrec_nb_global_verify_ssl(nb_global);
     if (ssl) {
         nbrec_ssl_delete(ssl);
@@ -3641,6 +3643,7 @@ cmd_set_ssl(struct ctl_context *ctx)
     }
 
     nbrec_nb_global_set_ssl(nb_global, ssl);
+    VLOG_INFO("Finished setting ssl stuff...");
 }
 
 static const struct ctl_table_class tables[NBREC_N_TABLES] = {
@@ -3804,6 +3807,7 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         break;
 
     case TXN_TRY_AGAIN:
+        VLOG_INFO("Had to try again?");
         goto try_again;
 
     case TXN_ERROR:
