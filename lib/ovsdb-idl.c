@@ -4155,6 +4155,7 @@ ovsdb_idl_txn_commit(struct ovsdb_idl_txn *txn)
                     json_hash(txn->request_id, 0));
         txn->status = TXN_INCOMPLETE;
     } else {
+        VLOG_INFO("Returning try again here?");
         txn->status = TXN_TRY_AGAIN;
     }
 
@@ -4534,6 +4535,7 @@ ovsdb_idl_db_txn_abort_all(struct ovsdb_idl_db *db)
     struct ovsdb_idl_txn *txn;
 
     HMAP_FOR_EACH (txn, hmap_node, &db->outstanding_txns) {
+        VLOG_INFO("Setting try again on a txn_abort_all");
         ovsdb_idl_txn_complete(txn, TXN_TRY_AGAIN);
     }
 }

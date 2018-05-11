@@ -3778,6 +3778,7 @@ do_nbctl(const char *args, struct ctl_command *commands, size_t n_commands,
         }
     }
 
+    VLOG_INFO("About to commit transaction");
     status = ovsdb_idl_txn_commit_block(txn);
     if (wait_type != NBCTL_WAIT_NONE && status == TXN_SUCCESS) {
         next_cfg = ovsdb_idl_txn_get_increment_new_value(txn);
