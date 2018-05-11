@@ -3926,6 +3926,8 @@ ovsdb_idl_txn_commit(struct ovsdb_idl_txn *txn)
     struct json *operations;
     bool any_updates;
 
+    VLOG_INFO("How about this?");
+
     if (txn != txn->db->txn) {
         goto coverage_out;
     }
@@ -4186,6 +4188,7 @@ enum ovsdb_idl_txn_status
 ovsdb_idl_txn_commit_block(struct ovsdb_idl_txn *txn)
 {
     enum ovsdb_idl_txn_status status;
+    VLOG_INFO("Does this even print?");
 
     fatal_signal_run();
     while ((status = ovsdb_idl_txn_commit(txn)) == TXN_INCOMPLETE) {
