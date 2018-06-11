@@ -18,6 +18,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include "command-line.h"
 #include "db-ctl-base.h"
@@ -38,6 +39,7 @@
 #include "table.h"
 #include "timeval.h"
 #include "util.h"
+#include "stopwatch.h"
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(nbctl);
@@ -89,6 +91,15 @@ static bool do_nbctl(const char *args, struct ctl_command *, size_t n,
 static const struct nbrec_dhcp_options *dhcp_options_get(
     struct ctl_context *ctx, const char *id, bool must_exist);
 
+#define TIME_FUNCTION(name, function) \
+    stopwatch_create(name, SW_MS); \
+    stopwatch_start(name, time_msec()); \
+    function; \
+    stopwatch_stop(name, time_msec()); \
+    stopwatch_sync(); \
+    stopwatch_get_stats(name, &stats); \
+    VLOG_INFO("%s took %llu ms to run", name, stats.max)
+
 int
 main(int argc, char *argv[])
 {
@@ -119,9 +130,15 @@ main(int argc, char *argv[])
     }
 
     /* Initialize IDL. */
-    idl = the_idl = ovsdb_idl_create(db, &nbrec_idl_class, true, false);
-    ovsdb_idl_set_leader_only(idl, leader_only);
-    run_prerequisites(commands, n_commands, idl);
+    stopwatch_create("everything", SW_MS);
+    stopwatch_create("Command execution", SW_MS);
+    stopwatch_create("IDL run", SW_MS);
+    stopwatch_create("poll", SW_MS);
+    struct stopwatch_stats stats;
+    stopwatch_start("everything", time_msec());
+    TIME_FUNCTION("idl_create", idl = the_idl = ovsdb_idl_create(db, &nbrec_idl_class, true, false));
+    TIME_FUNCTION("set_leader", ovsdb_idl_set_leader_only(idl, leader_only));
+    TIME_FUNCTION("run_prerequisites", run_prerequisites(commands, n_commands, idl));
 
     /* Execute the commands.
      *
@@ -132,7 +149,12 @@ main(int argc, char *argv[])
      * view of the database before we try the transaction again. */
     seqno = ovsdb_idl_get_seqno(idl);
     for (;;) {
+        stopwatch_start("IDL run", time_msec());
         ovsdb_idl_run(idl);
+        stopwatch_stop("IDL run", time_msec());
+        stopwatch_sync();
+        stopwatch_get_stats("IDL run", &stats);
+        VLOG_INFO("IDL run max is now %llu", stats.max);
         if (!ovsdb_idl_is_alive(idl)) {
             int retval = ovsdb_idl_get_last_error(idl);
             ctl_fatal("%s: database connection failed (%s)",
@@ -141,15 +163,34 @@ main(int argc, char *argv[])
 
         if (seqno != ovsdb_idl_get_seqno(idl)) {
             seqno = ovsdb_idl_get_seqno(idl);
+            stopwatch_start("Command_execution", time_msec());
             if (do_nbctl(args, commands, n_commands, idl)) {
                 free(args);
+                stopwatch_stop("Command execution", time_msec());
+                stopwatch_stop("everything", time_msec());
+                stopwatch_sync();
+                stopwatch_get_stats("Command execution", &stats);
+                VLOG_INFO("It took %llu ms to execute the command", stats.max);
+                stopwatch_get_stats("everything", &stats);
+                VLOG_INFO("It took %llu ms to do the whole thing", stats.max);
+                stopwatch_get_stats("IDL run", &stats);
+                VLOG_INFO("IDL run stats: max %llu, min %llu, samples %llu, average %f", stats.max, stats.min, stats.count, stats.ewma_50);
+                stopwatch_get_stats("poll", &stats);
+                VLOG_INFO("poll stats: max %llu, min %llu, samples %llu, average %f", stats.max, stats.min, stats.count, stats.ewma_50);
+                stopwatch_get_stats("wait", &stats);
+                VLOG_INFO("poll stats: max %llu, min %llu, samples %llu, average %f", stats.max, stats.min, stats.count, stats.ewma_50);
                 exit(EXIT_SUCCESS);
             }
+            stopwatch_stop("Command execution", time_msec());
         }
 
         if (seqno == ovsdb_idl_get_seqno(idl)) {
+            stopwatch_start("wait", time_msec());
             ovsdb_idl_wait(idl);
+            stopwatch_stop("wait", time_msec());
+            stopwatch_start("poll", time_msec());
             poll_block();
+            stopwatch_stop("poll", time_msec());
         }
     }
 }
