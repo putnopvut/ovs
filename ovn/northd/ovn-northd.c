@@ -1065,10 +1065,11 @@ enum dynamic_update_type {
 };
 
 struct dynamic_address_update {
+    struct ovs_list node;       /* In build_ipam()'s list of updates. */
+
     struct ovn_port *op;
-    struct ovn_datapath *od;
+
     struct lport_addresses current_addresses;
-    struct ovs_list list;
     struct eth_addr static_mac;
     enum dynamic_update_type mac;
     enum dynamic_update_type ipv4;
@@ -1102,7 +1103,7 @@ dynamic_mac_changed(const char *lsp_addresses,
 static enum dynamic_update_type
 dynamic_ip4_changed(struct dynamic_address_update *update)
 {
-    bool dynamic_ip4 = update->od->ipam_info.allocated_ipv4s != NULL;
+    bool dynamic_ip4 = update->op->od->ipam_info.allocated_ipv4s != NULL;
 
     if (!dynamic_ip4) {
         if (update->current_addresses.n_ipv4_addrs) {
@@ -1118,13 +1119,13 @@ dynamic_ip4_changed(struct dynamic_address_update *update)
     }
 
     uint32_t ip4 = ntohl(update->current_addresses.ipv4_addrs[0].addr);
-    if (ip4 < update->od->ipam_info.start_ipv4) {
+    if (ip4 < update->op->od->ipam_info.start_ipv4) {
         return DYNAMIC;
     }
 
-    uint32_t index = ip4 - update->od->ipam_info.start_ipv4;
-    if (index > update->od->ipam_info.total_ipv4s ||
-        bitmap_is_set(update->od->ipam_info.allocated_ipv4s, index)) {
+    uint32_t index = ip4 - update->op->od->ipam_info.start_ipv4;
+    if (index > update->op->od->ipam_info.total_ipv4s ||
+        bitmap_is_set(update->op->od->ipam_info.allocated_ipv4s, index)) {
         /* Previously assigned dynamic IPv4 address can no longer be used.
          * It's either outside the subnet, conflicts with an excluded IP,
          * or conflicts with a statically-assigned address on the switch
@@ -1138,7 +1139,7 @@ dynamic_ip4_changed(struct dynamic_address_update *update)
 static enum dynamic_update_type
 dynamic_ip6_changed(struct dynamic_address_update *update)
 {
-    bool dynamic_ip6 = update->od->ipam_info.ipv6_prefix_set;
+    bool dynamic_ip6 = update->op->od->ipam_info.ipv6_prefix_set;
 
     if (!dynamic_ip6) {
         if (update->current_addresses.n_ipv6_addrs) {
@@ -1164,8 +1165,8 @@ dynamic_ip6_changed(struct dynamic_address_update *update)
 
     struct in6_addr masked = ipv6_addr_bitand(
         &update->current_addresses.ipv6_addrs[0].addr,
-        &update->od->ipam_info.ipv6_prefix);
-    if (!IN6_ARE_ADDR_EQUAL(&masked, &update->od->ipam_info.ipv6_prefix)) {
+        &update->op->od->ipam_info.ipv6_prefix);
+    if (!IN6_ARE_ADDR_EQUAL(&masked, &update->op->od->ipam_info.ipv6_prefix)) {
         return DYNAMIC;
     }
 
@@ -1191,7 +1192,7 @@ dynamic_addresses_check_for_updates(const char *lsp_addrs,
         ipam_insert_mac(&update->current_addresses.ea, false);
     }
     if (update->ipv4 == NONE && update->current_addresses.n_ipv4_addrs) {
-        ipam_insert_ip(update->od,
+        ipam_insert_ip(update->op->od,
                        ntohl(update->current_addresses.ipv4_addrs[0].addr));
     }
     if (update->mac == NONE &&
@@ -1228,12 +1229,12 @@ set_dynamic_updates(const char *addrspec,
     } else {
         update->mac = DYNAMIC;
     }
-    if (update->od->ipam_info.allocated_ipv4s) {
+    if (update->op->od->ipam_info.allocated_ipv4s) {
         update->ipv4 = DYNAMIC;
     } else {
         update->ipv4 = NONE;
     }
-    if (update->od->ipam_info.ipv6_prefix_set) {
+    if (update->op->od->ipam_info.ipv6_prefix_set) {
         update->ipv6 = DYNAMIC;
     } else {
         update->ipv6 = NONE;
@@ -1323,16 +1324,11 @@ build_ipam(struct hmap *datapaths, struct hmap *ports)
         if (!od->nbs) {
             continue;
         }
-        struct dynamic_address_update *update;
+
         struct ovs_list updates;
         ovs_list_init(&updates);
         for (size_t i = 0; i < od->nbs->n_ports; i++) {
-            const struct nbrec_logical_switch_port *nbsp =
-                od->nbs->ports[i];
-
-            if (!nbsp) {
-                continue;
-            }
+            const struct nbrec_logical_switch_port *nbsp = od->nbs->ports[i];
 
             if (!od->ipam_info.allocated_ipv4s &&
                 !od->ipam_info.ipv6_prefix_set) {
@@ -1344,7 +1340,7 @@ build_ipam(struct hmap *datapaths, struct hmap *ports)
             }
 
             struct ovn_port *op = ovn_port_find(ports, nbsp->name);
-            if (!op || (op->nbsp && op->peer)) {
+            if (!op || op->nbsp != nbsp || op->peer) {
                 /* Do not allocate addresses for logical switch ports that
                  * have a peer. */
                 continue;
@@ -1354,15 +1350,15 @@ build_ipam(struct hmap *datapaths, struct hmap *ports)
                 if (!is_dynamic_lsp_address(nbsp->addresses[j])) {
                     continue;
                 }
-                update = xzalloc(sizeof *update);
-                update->od = od;
+                struct dynamic_address_update *update
+                    = xzalloc(sizeof *update);
                 update->op = op;
                 if (nbsp->dynamic_addresses) {
-                    extract_lsp_addresses(op->nbsp->dynamic_addresses,
+                    extract_lsp_addresses(nbsp->dynamic_addresses,
                                           &update->current_addresses);
                     if (dynamic_addresses_check_for_updates(nbsp->addresses[j],
                                                             update)) {
-                        ovs_list_push_back(&updates, &update->list);
+                        ovs_list_push_back(&updates, &update->node);
                     } else {
                         /* No changes to dynamic addresses */
                         set_lsp_dynamic_addresses(nbsp->dynamic_addresses, op);
@@ -1371,20 +1367,20 @@ build_ipam(struct hmap *datapaths, struct hmap *ports)
                     }
                 } else {
                     set_dynamic_updates(nbsp->addresses[j], update);
-                    ovs_list_push_back(&updates, &update->list);
+                    ovs_list_push_back(&updates, &update->node);
                 }
             }
 
             if (!nbsp->n_addresses && nbsp->dynamic_addresses) {
-                nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp,
-                                                                NULL);
+                nbrec_logical_switch_port_set_dynamic_addresses(nbsp, NULL);
             }
         }
 
         /* After retaining all unchanged dynamic addresses, now assign
          * new ones.
          */
-        LIST_FOR_EACH_POP (update, list, &updates) {
+        struct dynamic_address_update *update;
+        LIST_FOR_EACH_POP (update, node, &updates) {
             update_dynamic_addresses(od, update);
             destroy_lport_addresses(&update->current_addresses);
             free(update);
