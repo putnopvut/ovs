@@ -1549,11 +1549,21 @@ join_logical_ports(struct northd_context *ctx,
                 op->lsp_addrs
                     = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
+                    int num_dynamic_addresses = 0;
                     if (!strcmp(nbsp->addresses[j], "unknown")
                         || !strcmp(nbsp->addresses[j], "router")) {
                         continue;
                     }
                     if (is_dynamic_lsp_address(nbsp->addresses[j])) {
+                        if (num_dynamic_addresses) {
+                            static struct vlog_rate_limit rl
+                                = VLOG_RATE_LIMIT_INIT(1, 1);
+                            VLOG_WARN_RL(&rl, "More than one dynamic address "
+                                              "configured for logical switch "
+                                              "port '%s'",
+                                              op->nbsp->name);
+                        }
+                        num_dynamic_addresses++;
                         continue;
                     } else if (!extract_lsp_addresses(nbsp->addresses[j],
                                            &op->lsp_addrs[op->n_lsp_addrs])) {
