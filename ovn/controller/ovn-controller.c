@@ -541,11 +541,16 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     physical_register_ovs_idl(ovs_idl);
 }
 
+struct end_times {
+    bool exiting;
+    bool reloading;
+};
+
 int
 main(int argc, char *argv[])
 {
     struct unixctl_server *unixctl;
-    bool exiting;
+    struct end_times end;
     int retval;
 
     ovs_cmdl_proctitle_init(argc, argv);
@@ -560,7 +565,7 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &end);
 
     /* Initialize group ids for loadbalancing. */
     struct ovn_extend_table group_table;
@@ -630,8 +635,8 @@ main(int argc, char *argv[])
 
     stopwatch_create(CONTROLLER_LOOP_STOPWATCH_NAME, SW_MS);
     /* Main loop. */
-    exiting = false;
-    while (!exiting) {
+    end.exiting = end.reloading = false;
+    while (!end.exiting) {
         /* Check OVN SB database. */
         char *new_ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
         if (strcmp(ovnsb_remote, new_ovnsb_remote)) {
@@ -821,7 +826,7 @@ main(int argc, char *argv[])
         unixctl_server_run(unixctl);
 
         unixctl_server_wait(unixctl);
-        if (exiting || pending_pkt.conn) {
+        if (end.exiting || pending_pkt.conn) {
             poll_immediate_wake();
         }
 
@@ -844,7 +849,7 @@ main(int argc, char *argv[])
         }
         poll_block();
         if (should_service_stop()) {
-            exiting = true;
+            end.exiting = true;
         }
     }
 
@@ -874,9 +879,9 @@ main(int argc, char *argv[])
 
         /* Run all of the cleanup functions, even if one of them returns false.
          * We're done if all of them return true. */
-        done = binding_cleanup(ovnsb_idl_txn, port_binding_table, chassis);
-        done = chassis_cleanup(ovnsb_idl_txn, chassis) && done;
-        done = encaps_cleanup(ovs_idl_txn, br_int) && done;
+        done = end.reloading || (binding_cleanup(ovnsb_idl_txn, port_binding_table, chassis));
+        done = end.reloading || (chassis_cleanup(ovnsb_idl_txn, chassis) && done);
+        done = end.reloading || (encaps_cleanup(ovs_idl_txn, br_int) && done);
         if (done) {
             poll_immediate_wake();
         }
@@ -1000,10 +1005,12 @@ usage(void)
 
 static void
 ovn_controller_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
-             const char *argv[] OVS_UNUSED, void *exiting_)
+             const char *argv[] OVS_UNUSED, void *end_)
 {
-    bool *exiting = exiting_;
-    *exiting = true;
+    struct end_times *end = end_;
+    end->exiting = true;
+    /* XXX Just hard-code reloading in for the time being... */
+    end->reloading = true;
 
     unixctl_command_reply(conn, NULL);
 }
