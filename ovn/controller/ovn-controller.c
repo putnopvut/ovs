@@ -1010,7 +1010,6 @@ ovn_controller_exit(struct unixctl_conn *conn, int argc,
              const char *argv[], void *exiting_)
 {
     enum exit_status *exiting = exiting_;
-    /* XXX Just hard-code restarting in for the time being... */
     if (argc == 2 && !strcmp(argv[1], "--restart")) {
         *exiting = EXIT_RESTART;
     } else {
