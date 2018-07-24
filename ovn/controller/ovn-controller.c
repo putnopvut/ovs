@@ -565,7 +565,7 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 1, ovn_controller_exit, &exiting);
 
     /* Initialize group ids for loadbalancing. */
     struct ovn_extend_table group_table;
@@ -1006,8 +1006,8 @@ usage(void)
 }
 
 static void
-ovn_controller_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
-             const char *argv[] OVS_UNUSED, void *exiting_)
+ovn_controller_exit(struct unixctl_conn *conn, int argc,
+             const char *argv[], void *exiting_)
 {
     enum exit_status *exiting = exiting_;
     /* XXX Just hard-code restarting in for the time being... */
