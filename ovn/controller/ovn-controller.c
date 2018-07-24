@@ -541,16 +541,18 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     physical_register_ovs_idl(ovs_idl);
 }
 
-enum exit_status {
-    EXIT_NORMAL = 1,
-    EXIT_RESTART,
+struct ovn_controller_exit_args {
+    bool *exiting;
+    bool *restart;
 };
 
 int
 main(int argc, char *argv[])
 {
     struct unixctl_server *unixctl;
-    enum exit_status exiting;
+    bool exiting;
+    bool restart;
+    struct ovn_controller_exit_args exit_args = {&exiting, &restart};
     int retval;
 
     ovs_cmdl_proctitle_init(argc, argv);
@@ -565,7 +567,7 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 1, ovn_controller_exit, &exiting);
+    unixctl_command_register("exit", "", 0, 1, ovn_controller_exit, &exit_args);
 
     /* Initialize group ids for loadbalancing. */
     struct ovn_extend_table group_table;
@@ -635,7 +637,8 @@ main(int argc, char *argv[])
 
     stopwatch_create(CONTROLLER_LOOP_STOPWATCH_NAME, SW_MS);
     /* Main loop. */
-    exiting = 0;
+    exiting = false;
+    restart = false;
     while (!exiting) {
         /* Check OVN SB database. */
         char *new_ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
@@ -849,12 +852,12 @@ main(int argc, char *argv[])
         }
         poll_block();
         if (should_service_stop()) {
-            exiting = EXIT_NORMAL;
+            exiting = true;
         }
     }
 
     /* It's time to exit.  Clean up the databases if we are not restarting */
-    if (exiting == EXIT_NORMAL) {
+    if (!restart) {
         bool done = false;
         while (!done) {
             struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
@@ -1007,15 +1010,11 @@ usage(void)
 
 static void
 ovn_controller_exit(struct unixctl_conn *conn, int argc,
-             const char *argv[], void *exiting_)
+             const char *argv[], void *exit_args_)
 {
-    enum exit_status *exiting = exiting_;
-    if (argc == 2 && !strcmp(argv[1], "--restart")) {
-        *exiting = EXIT_RESTART;
-    } else {
-        *exiting = EXIT_NORMAL;
-    }
-
+    struct ovn_controller_exit_args *exit_args = exit_args_;
+    *exit_args->exiting = true;
+    *exit_args->restart = argc == 2 && !strcmp(argv[1], "--restart");
     unixctl_command_reply(conn, NULL);
 }
 
