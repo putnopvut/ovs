@@ -541,16 +541,16 @@ ctrl_register_ovs_idl(struct ovsdb_idl *ovs_idl)
     physical_register_ovs_idl(ovs_idl);
 }
 
-struct end_times {
-    bool exiting;
-    bool reloading;
+enum exit_status {
+    EXIT_NORMAL = 1,
+    EXIT_RESTART,
 };
 
 int
 main(int argc, char *argv[])
 {
     struct unixctl_server *unixctl;
-    struct end_times end;
+    enum exit_status exiting;
     int retval;
 
     ovs_cmdl_proctitle_init(argc, argv);
@@ -565,7 +565,7 @@ main(int argc, char *argv[])
     if (retval) {
         exit(EXIT_FAILURE);
     }
-    unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &end);
+    unixctl_command_register("exit", "", 0, 0, ovn_controller_exit, &exiting);
 
     /* Initialize group ids for loadbalancing. */
     struct ovn_extend_table group_table;
@@ -635,8 +635,8 @@ main(int argc, char *argv[])
 
     stopwatch_create(CONTROLLER_LOOP_STOPWATCH_NAME, SW_MS);
     /* Main loop. */
-    end.exiting = end.reloading = false;
-    while (!end.exiting) {
+    exiting = 0;
+    while (!exiting) {
         /* Check OVN SB database. */
         char *new_ovnsb_remote = get_ovnsb_remote(ovs_idl_loop.idl);
         if (strcmp(ovnsb_remote, new_ovnsb_remote)) {
@@ -826,7 +826,7 @@ main(int argc, char *argv[])
         unixctl_server_run(unixctl);
 
         unixctl_server_wait(unixctl);
-        if (end.exiting || pending_pkt.conn) {
+        if (exiting || pending_pkt.conn) {
             poll_immediate_wake();
         }
 
@@ -849,46 +849,48 @@ main(int argc, char *argv[])
         }
         poll_block();
         if (should_service_stop()) {
-            end.exiting = true;
+            exiting = EXIT_NORMAL;
         }
     }
 
-    /* It's time to exit.  Clean up the databases. */
-    bool done = false;
-    while (!done) {
-        struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
-        struct ovsdb_idl_txn *ovnsb_idl_txn
-            = ovsdb_idl_loop_run(&ovnsb_idl_loop);
+    /* It's time to exit.  Clean up the databases if we are not restarting */
+    if (exiting == EXIT_NORMAL) {
+        bool done = false;
+        while (!done) {
+            struct ovsdb_idl_txn *ovs_idl_txn = ovsdb_idl_loop_run(&ovs_idl_loop);
+            struct ovsdb_idl_txn *ovnsb_idl_txn
+                = ovsdb_idl_loop_run(&ovnsb_idl_loop);
 
-        const struct ovsrec_bridge_table *bridge_table
-            = ovsrec_bridge_table_get(ovs_idl_loop.idl);
-        const struct ovsrec_open_vswitch_table *ovs_table
-            = ovsrec_open_vswitch_table_get(ovs_idl_loop.idl);
+            const struct ovsrec_bridge_table *bridge_table
+                = ovsrec_bridge_table_get(ovs_idl_loop.idl);
+            const struct ovsrec_open_vswitch_table *ovs_table
+                = ovsrec_open_vswitch_table_get(ovs_idl_loop.idl);
 
-        const struct sbrec_port_binding_table *port_binding_table
-            = sbrec_port_binding_table_get(ovnsb_idl_loop.idl);
+            const struct sbrec_port_binding_table *port_binding_table
+                = sbrec_port_binding_table_get(ovnsb_idl_loop.idl);
 
-        const struct ovsrec_bridge *br_int = get_br_int(ovs_idl_txn,
-                                                        bridge_table,
-                                                        ovs_table);
-        const char *chassis_id = get_chassis_id(ovs_table);
-        const struct sbrec_chassis *chassis
-            = (chassis_id
-               ? chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id)
-               : NULL);
+            const struct ovsrec_bridge *br_int = get_br_int(ovs_idl_txn,
+                                                            bridge_table,
+                                                            ovs_table);
+            const char *chassis_id = get_chassis_id(ovs_table);
+            const struct sbrec_chassis *chassis
+                = (chassis_id
+                   ? chassis_lookup_by_name(sbrec_chassis_by_name, chassis_id)
+                   : NULL);
 
-        /* Run all of the cleanup functions, even if one of them returns false.
-         * We're done if all of them return true. */
-        done = end.reloading || (binding_cleanup(ovnsb_idl_txn, port_binding_table, chassis));
-        done = end.reloading || (chassis_cleanup(ovnsb_idl_txn, chassis) && done);
-        done = end.reloading || (encaps_cleanup(ovs_idl_txn, br_int) && done);
-        if (done) {
-            poll_immediate_wake();
+            /* Run all of the cleanup functions, even if one of them returns false.
+             * We're done if all of them return true. */
+            done = binding_cleanup(ovnsb_idl_txn, port_binding_table, chassis);
+            done = chassis_cleanup(ovnsb_idl_txn, chassis) && done;
+            done = encaps_cleanup(ovs_idl_txn, br_int) && done;
+            if (done) {
+                poll_immediate_wake();
+            }
+
+            ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
+            ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
+            poll_block();
         }
-
-        ovsdb_idl_loop_commit_and_wait(&ovnsb_idl_loop);
-        ovsdb_idl_loop_commit_and_wait(&ovs_idl_loop);
-        poll_block();
     }
 
     unixctl_server_destroy(unixctl);
@@ -1005,12 +1007,15 @@ usage(void)
 
 static void
 ovn_controller_exit(struct unixctl_conn *conn, int argc OVS_UNUSED,
-             const char *argv[] OVS_UNUSED, void *end_)
+             const char *argv[] OVS_UNUSED, void *exiting_)
 {
-    struct end_times *end = end_;
-    end->exiting = true;
-    /* XXX Just hard-code reloading in for the time being... */
-    end->reloading = true;
+    enum exit_status *exiting = exiting_;
+    /* XXX Just hard-code restarting in for the time being... */
+    if (argc == 2 && !strcmp(argv[1], "--restart")) {
+        *exiting = EXIT_RESTART;
+    } else {
+        *exiting = EXIT_NORMAL;
+    }
 
     unixctl_command_reply(conn, NULL);
 }
