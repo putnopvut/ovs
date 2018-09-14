@@ -4655,6 +4655,71 @@ cmd_set_ssl(struct ctl_context *ctx)
     nbrec_nb_global_set_ssl(nb_global, ssl);
 }
 
+static char *
+add_ports_to_pg(struct ctl_context *ctx, const struct nbrec_port_group *pg,
+                char **ports, size_t num_ports)
+{
+    struct nbrec_logical_switch_port **lports
+        = xmalloc(sizeof *lports * num_ports);
+    char *error = NULL;
+    size_t i;
+    for (i = 0; i < num_ports; i++) {
+        const struct nbrec_logical_switch_port *lsp;
+        error = lsp_by_name_or_uuid(ctx, ports[i], true, &lsp);
+        if (error) {
+            goto out;
+        }
+        lports[i] = (struct nbrec_logical_switch_port *) lsp;
+    }
+    nbrec_port_group_set_ports(pg, lports, i);
+
+out:
+    free(lports);
+    return error;
+}
+
+static void
+cmd_pg_add(struct ctl_context *ctx)
+{
+    const struct nbrec_port_group *pg;
+
+    pg = nbrec_port_group_insert(ctx->txn);
+    nbrec_port_group_set_name(pg, ctx->argv[1]);
+    if (ctx->argc > 2) {
+        ctx->error = add_ports_to_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2);
+    }
+}
+
+static void
+cmd_pg_set_ports(struct ctl_context *ctx)
+{
+    const struct nbrec_port_group *pg;
+
+    char *error;
+    error = pg_by_name_or_uuid(ctx, ctx->argv[1], true, &pg);
+    if (error) {
+        ctx->error = error;
+        return;
+    }
+
+    ctx->error = add_ports_to_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2);
+}
+
+static void
+cmd_pg_del(struct ctl_context *ctx)
+{
+    const struct nbrec_port_group *pg;
+
+    char *error;
+    error = pg_by_name_or_uuid(ctx, ctx->argv[1], true, &pg);
+    if (error) {
+        ctx->error = error;
+        return;
+    }
+
+    nbrec_port_group_delete(pg);
+}
+
 static const struct ctl_table_class tables[NBREC_N_TABLES] = {
     [NBREC_TABLE_DHCP_OPTIONS].row_ids
     = {{&nbrec_logical_switch_port_col_name, NULL,
@@ -5122,6 +5187,11 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     {"set-ssl", 3, 5,
         "PRIVATE-KEY CERTIFICATE CA-CERT [SSL-PROTOS [SSL-CIPHERS]]",
         pre_cmd_set_ssl, cmd_set_ssl, NULL, "--bootstrap", RW},
+
+    /* Port Group Commands */
+    {"pg-add", 1, INT_MAX, "", NULL, cmd_pg_add, NULL, "", RW },
+    {"pg-set-ports", 2, INT_MAX, "", NULL, cmd_pg_set_ports, NULL, "", RW },
+    {"pg-del", 1, 1, "", NULL, cmd_pg_del, NULL, "", RW },
 
     {NULL, 0, 0, NULL, NULL, NULL, NULL, "", RO},
 };
