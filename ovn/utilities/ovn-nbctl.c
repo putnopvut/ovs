@@ -4656,13 +4656,18 @@ cmd_set_ssl(struct ctl_context *ctx)
 }
 
 static char *
-add_ports_to_pg(struct ctl_context *ctx, const struct nbrec_port_group *pg,
-                char **ports, size_t num_ports)
+set_ports_on_pg(struct ctl_context *ctx, const struct nbrec_port_group *pg,
+                char **ports, size_t num_ports, bool replace)
 {
     struct nbrec_logical_switch_port **lports
         = xmalloc(sizeof *lports * num_ports);
     char *error = NULL;
     size_t i;
+    if (replace) {
+        lports = xmalloc(sizeof *lports * num_ports);
+    } else {
+        lports = xmalloc(sizeof *lports * (num_ports + pg->n_ports));
+    }
     for (i = 0; i < num_ports; i++) {
         const struct nbrec_logical_switch_port *lsp;
         error = lsp_by_name_or_uuid(ctx, ports[i], true, &lsp);
@@ -4671,7 +4676,16 @@ add_ports_to_pg(struct ctl_context *ctx, const struct nbrec_port_group *pg,
         }
         lports[i] = (struct nbrec_logical_switch_port *) lsp;
     }
-    nbrec_port_group_set_ports(pg, lports, i);
+    
+    if (replace) {
+        nbrec_port_group_set_ports(pg, lports, num_ports);
+        goto out;
+    }
+
+    for (i = 0; i < pg->n_ports; i++) {
+        lports[i + num_ports] = pg->ports[i];
+    }
+    nbrec_port_group_set_ports(pg, lports, num_ports + pg->n_ports);
 
 out:
     free(lports);
@@ -4686,7 +4700,7 @@ cmd_pg_add(struct ctl_context *ctx)
     pg = nbrec_port_group_insert(ctx->txn);
     nbrec_port_group_set_name(pg, ctx->argv[1]);
     if (ctx->argc > 2) {
-        ctx->error = add_ports_to_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2);
+        ctx->error = set_ports_on_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2, true);
     }
 }
 
@@ -4702,7 +4716,22 @@ cmd_pg_set_ports(struct ctl_context *ctx)
         return;
     }
 
-    ctx->error = add_ports_to_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2);
+    ctx->error = set_ports_on_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2, true);
+}
+
+static void
+cmd_pg_add_ports(struct ctl_context *ctx)
+{
+    const struct nbrec_port_group *pg;
+
+    char *error;
+    error = pg_by_name_or_uuid(ctx, ctx->argv[1], true, &pg);
+    if (error) {
+        ctx->error = error;
+        return;
+    }
+
+    ctx->error = set_ports_on_pg(ctx, pg, ctx->argv + 2, ctx->argc - 2, false);
 }
 
 static void
@@ -5191,6 +5220,7 @@ static const struct ctl_command_syntax nbctl_commands[] = {
     /* Port Group Commands */
     {"pg-add", 1, INT_MAX, "", NULL, cmd_pg_add, NULL, "", RW },
     {"pg-set-ports", 2, INT_MAX, "", NULL, cmd_pg_set_ports, NULL, "", RW },
+    {"pg-add-ports", 2, INT_MAX, "", NULL, cmd_pg_add_ports, NULL, "", RW },
     {"pg-del", 1, 1, "", NULL, cmd_pg_del, NULL, "", RW },
 
     {NULL, 0, 0, NULL, NULL, NULL, NULL, "", RO},
