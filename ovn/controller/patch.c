@@ -20,6 +20,7 @@
 #include "hash.h"
 #include "lflow.h"
 #include "lib/vswitch-idl.h"
+#include "lib/sset.h"
 #include "lport.h"
 #include "openvswitch/hmap.h"
 #include "openvswitch/vlog.h"
@@ -139,7 +140,8 @@ add_bridge_mappings(struct ovsdb_idl_txn *ovs_idl_txn,
                     const struct sbrec_port_binding_table *port_binding_table,
                     const struct ovsrec_bridge *br_int,
                     struct shash *existing_ports,
-                    const struct sbrec_chassis *chassis)
+                    const struct sbrec_chassis *chassis,
+                    struct sset *egress_ifaces)
 {
     /* Get ovn-bridge-mappings. */
     const char *mappings_cfg = "";
@@ -218,6 +220,24 @@ add_bridge_mappings(struct ovsdb_idl_txn *ovs_idl_txn,
                           br_int, name1, br_ln, name2, existing_ports);
         create_patch_port(ovs_idl_txn, patch_port_id, binding->logical_port,
                           br_ln, name2, br_int, name1, existing_ports);
+
+        /* Add egress-ifaces from the connected bridge */
+        int i;
+        for (i = 0; i < br_ln->n_ports; i++) {
+            const struct ovsrec_port *port_rec = br_ln->ports[i];
+            int j;
+            for (j = 0; j < port_rec->n_interfaces; j++) {
+                const struct ovsrec_interface *iface_rec;
+
+                iface_rec = port_rec->interfaces[j];
+                bool is_egress_iface = smap_get_bool(&iface_rec->external_ids,
+                                                     "ovn-egress-iface");
+                if (is_egress_iface) {
+                    sset_add(egress_ifaces, iface_rec->name);
+                }
+            }
+        }
+
         free(name1);
         free(name2);
     }
@@ -232,9 +252,10 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
           const struct ovsrec_port_table *port_table,
           const struct sbrec_port_binding_table *port_binding_table,
           const struct ovsrec_bridge *br_int,
-          const struct sbrec_chassis *chassis)
+          const struct sbrec_chassis *chassis,
+          struct sset *egress_ifaces)
 {
-    if (!ovs_idl_txn) {
+    if (!ovs_idl_txn || !br_int || !chassis) {
         return;
     }
 
@@ -259,7 +280,8 @@ patch_run(struct ovsdb_idl_txn *ovs_idl_txn,
      * 'existing_ports' any patch ports that do exist in the database and
      * should be there. */
     add_bridge_mappings(ovs_idl_txn, bridge_table, ovs_table,
-                        port_binding_table, br_int, &existing_ports, chassis);
+                        port_binding_table, br_int, &existing_ports, chassis,
+                        egress_ifaces);
 
     /* Now 'existing_ports' only still contains patch ports that exist in the
      * database but shouldn't.  Delete them from the database. */

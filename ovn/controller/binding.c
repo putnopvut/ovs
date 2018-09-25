@@ -559,7 +559,7 @@ binding_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
             const struct sbrec_chassis *chassis_rec,
             const struct sset *active_tunnels,
             struct hmap *local_datapaths, struct sset *local_lports,
-            struct sset *local_lport_ids)
+            struct sset *local_lport_ids, struct sset *egress_ifaces)
 {
     if (!chassis_rec) {
         return;
@@ -567,13 +567,12 @@ binding_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
 
     const struct sbrec_port_binding *binding_rec;
     struct shash lport_to_iface = SHASH_INITIALIZER(&lport_to_iface);
-    struct sset egress_ifaces = SSET_INITIALIZER(&egress_ifaces);
     struct hmap qos_map;
 
     hmap_init(&qos_map);
     if (br_int) {
         get_local_iface_ids(br_int, &lport_to_iface, local_lports,
-                            &egress_ifaces);
+                            egress_ifaces);
     }
 
     /* Run through each binding record to see if it is resident on this
@@ -586,7 +585,7 @@ binding_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
                                 sbrec_port_binding_by_datapath,
                                 sbrec_port_binding_by_name,
                                 active_tunnels, chassis_rec, binding_rec,
-                                sset_is_empty(&egress_ifaces) ? NULL :
+                                sset_is_empty(egress_ifaces) ? NULL :
                                 &qos_map, local_datapaths, &lport_to_iface,
                                 local_lports, local_lport_ids);
 
@@ -601,16 +600,15 @@ binding_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
         }
     }
 
-    if (!sset_is_empty(&egress_ifaces)
-        && set_noop_qos(ovs_idl_txn, port_table, qos_table, &egress_ifaces)) {
+    if (!sset_is_empty(egress_ifaces)
+        && set_noop_qos(ovs_idl_txn, port_table, qos_table, egress_ifaces)) {
         const char *entry;
-        SSET_FOR_EACH (entry, &egress_ifaces) {
+        SSET_FOR_EACH (entry, egress_ifaces) {
             setup_qos(entry, &qos_map);
         }
     }
 
     shash_destroy(&lport_to_iface);
-    sset_destroy(&egress_ifaces);
     hmap_destroy(&qos_map);
 }
 

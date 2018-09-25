@@ -704,6 +704,16 @@ main(int argc, char *argv[])
                        ovsrec_bridge_table_get(ovs_idl_loop.idl), br_int,
                        sbrec_chassis_table_get(ovnsb_idl_loop.idl), chassis_id);
             bfd_calculate_active_tunnels(br_int, &active_tunnels);
+
+            struct sset egress_ifaces = SSET_INITIALIZER(&egress_ifaces);
+
+            patch_run(ovs_idl_txn,
+                      ovsrec_bridge_table_get(ovs_idl_loop.idl),
+                      ovsrec_open_vswitch_table_get(ovs_idl_loop.idl),
+                      ovsrec_port_table_get(ovs_idl_loop.idl),
+                      sbrec_port_binding_table_get(ovnsb_idl_loop.idl),
+                      br_int, chassis, &egress_ifaces);
+
             binding_run(ovnsb_idl_txn, ovs_idl_txn, sbrec_chassis_by_name,
                         sbrec_datapath_binding_by_key,
                         sbrec_port_binding_by_datapath,
@@ -713,7 +723,10 @@ main(int argc, char *argv[])
                         sbrec_port_binding_table_get(ovnsb_idl_loop.idl),
                         br_int, chassis,
                         &active_tunnels, &local_datapaths,
-                        &local_lports, &local_lport_ids);
+                        &local_lports, &local_lport_ids,
+                        &egress_ifaces);
+
+            sset_destroy(&egress_ifaces);
         }
         if (br_int && chassis) {
             struct shash addr_sets = SHASH_INITIALIZER(&addr_sets);
@@ -722,13 +735,6 @@ main(int argc, char *argv[])
             struct shash port_groups = SHASH_INITIALIZER(&port_groups);
             port_groups_init(sbrec_port_group_table_get(ovnsb_idl_loop.idl),
                              &port_groups);
-
-            patch_run(ovs_idl_txn,
-                      ovsrec_bridge_table_get(ovs_idl_loop.idl),
-                      ovsrec_open_vswitch_table_get(ovs_idl_loop.idl),
-                      ovsrec_port_table_get(ovs_idl_loop.idl),
-                      sbrec_port_binding_table_get(ovnsb_idl_loop.idl),
-                      br_int, chassis);
 
             enum mf_field_id mff_ovn_geneve = ofctrl_run(br_int,
                                                          &pending_ct_zones);
