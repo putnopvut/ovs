@@ -1,7 +1,7 @@
 {
     "name": "OVN_Northbound",
-    "version": "5.13.1",
-    "cksum": "749176366 20467",
+    "version": "5.13.2",
+    "cksum": "2160355742 20921",
     "tables": {
         "NB_Global": {
             "columns": {
@@ -391,5 +391,15 @@
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
             "indexes": [["name"]],
-            "isRoot": false}}
+            "isRoot": false},
+        "Multicast_Group": {
+            "columns": {
+                "name": {"type": "string"},
+                "address": {"type": "string"},
+                "ports": { "type": {"key": {"type": "uuid",
+                                            "refTable": "Logical_Switch_Port"},
+                                    "min": 0,
+                                    "max": "unlimited"}}},
+            "indexes": [["name"]],
+            "isRoot": true}}
     }

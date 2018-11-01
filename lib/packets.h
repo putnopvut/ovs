@@ -640,6 +640,16 @@ ip_is_local_multicast(ovs_be32 ip)
 {
     return (ip & htonl(0xffffff00)) == htonl(0xe0000000);
 }
+static inline void
+ip_multicast_to_ethernet(struct eth_addr *eth, ovs_be32 ip)
+{
+    eth->ea[0] = 0x01;
+    eth->ea[1] = 0x00;
+    eth->ea[2] = 0x5e;
+    eth->ea[3] = (ntohl(ip) & 0xef0000) >> 16;
+    eth->ea[4] = (ntohl(ip) & 0xff00) >> 8;
+    eth->ea[5] = (ntohl(ip) & 0xff);
+}
 int ip_count_cidr_bits(ovs_be32 netmask);
 void ip_format_masked(ovs_be32 ip, ovs_be32 mask, struct ds *);
 bool ip_parse(const char *s, ovs_be32 *ip);

@@ -2423,6 +2423,8 @@ struct ovn_multicast {
 
     struct ovn_port **ports;
     size_t n_ports, allocated_ports;
+    ovs_be32 address;
+    struct eth_addr eth;
 };
 
 static uint32_t
@@ -2450,7 +2452,7 @@ ovn_multicast_find(struct hmap *mcgroups, struct ovn_datapath *datapath,
 
 static void
 ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
-                  struct ovn_port *port)
+                  struct ovn_port *port, const char *address)
 {
     struct ovn_datapath *od = port->od;
     struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, group);
@@ -2462,6 +2464,13 @@ ovn_multicast_add(struct hmap *mcgroups, const struct multicast_group *group,
         mc->n_ports = 0;
         mc->allocated_ports = 4;
         mc->ports = xmalloc(mc->allocated_ports * sizeof *mc->ports);
+        if (address) {
+            ovs_scan(address, IP_SCAN_FMT, IP_SCAN_ARGS(&mc->address));
+            ip_multicast_to_ethernet(&mc->eth, mc->address);
+        } else {
+            mc->address = INADDR_ANY;
+            mc->eth = eth_addr_zero;
+        }
     }
     if (mc->n_ports >= mc->allocated_ports) {
         mc->ports = x2nrealloc(mc->ports, &mc->allocated_ports,
@@ -2474,6 +2483,7 @@ static void
 ovn_multicast_destroy(struct hmap *mcgroups, struct ovn_multicast *mc)
 {
     if (mc) {
+        /* XXX Leaking mc->group currently */
         hmap_remove(mcgroups, &mc->hmap_node);
         free(mc->ports);
         free(mc);
@@ -3685,6 +3695,42 @@ build_port_group_lswitches(struct northd_context *ctx, struct hmap *pgs,
 }
 
 static void
+build_multicast(struct northd_context *ctx,
+                struct hmap *ports,
+                struct hmap *mcgroups)
+{
+    uint16_t mgc_key = OVN_MIN_MULTICAST;
+    const struct nbrec_multicast_group *nb_mcg;
+    hmap_init(mcgroups);
+
+    NBREC_MULTICAST_GROUP_FOR_EACH (nb_mcg, ctx->ovnnb_idl) {
+        struct multicast_group *group = xmalloc(sizeof *group);
+        group->name = xstrdup(nb_mcg->name);
+        group->key = mgc_key++;
+
+        size_t i;
+        for (i = 0; i < nb_mcg->n_ports; i++) {
+            struct ovn_port *op = ovn_port_find(ports, nb_mcg->ports[i]->name);
+            if (!op) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_ERR_RL(&rl, "lport %s in multicast group %s not found.",
+                            nb_mcg->ports[i]->name, nb_mcg->name);
+                continue;
+            }
+            if (!op->od->nbs) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "lport %s in multicast group %s has no lswitch.",
+                             nb_mcg->ports[i]->name,
+                             nb_mcg->name);
+                continue;
+            }
+
+            ovn_multicast_add(mcgroups, group, op, nb_mcg->address);
+        }
+    }
+}
+
+static void
 build_acls(struct ovn_datapath *od, struct hmap *lflows,
            struct hmap *port_groups)
 {
@@ -4391,15 +4437,36 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
         ovn_lflow_add(lflows, od, S_SWITCH_IN_DNS_RESPONSE, 0, "1", "next;");
     }
 
-    /* Ingress table 16: Destination lookup, broadcast and multicast handling
-     * (priority 100). */
+    /* Ingress table 16: Destination lookup, custom multicast handling
+     * (priority 150). */
+    struct ovn_multicast *mc;
+    HMAP_FOR_EACH (mc, hmap_node, mcgroups) {
+        if (!mc->datapath->nbs) {
+            continue;
+        }
+
+        ds_clear(&match);
+        ds_put_format(&match, "eth.dst == "ETH_ADDR_FMT" && "
+                              "ip4.dst == "IP_FMT,
+                              ETH_ADDR_ARGS(mc->eth),
+                              IP_ARGS(mc->address));
+
+        ds_clear(&actions);
+        ds_put_format(&actions, "outport = \"%s\"; output;", mc->group->name);
+
+        ovn_lflow_add(lflows, mc->datapath, S_SWITCH_IN_L2_LKUP, 150,
+                      ds_cstr(&match), ds_cstr(&actions));
+    }
+
+    /* Ingress table 16: Destination lookup, built-in broadcast and multicast
+     * handling (priority 100). */
     HMAP_FOR_EACH (op, key_node, ports) {
         if (!op->nbsp) {
             continue;
         }
 
         if (lsp_is_enabled(op->nbsp)) {
-            ovn_multicast_add(mcgroups, &mc_flood, op);
+            ovn_multicast_add(mcgroups, &mc_flood, op, NULL);
         }
     }
     HMAP_FOR_EACH (od, key_node, datapaths) {
@@ -4434,7 +4501,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                               ds_cstr(&match), ds_cstr(&actions));
             } else if (!strcmp(op->nbsp->addresses[i], "unknown")) {
                 if (lsp_is_enabled(op->nbsp)) {
-                    ovn_multicast_add(mcgroups, &mc_unknown, op);
+                    ovn_multicast_add(mcgroups, &mc_unknown, op, NULL);
                     op->od->has_unknown = true;
                 }
             } else if (is_dynamic_lsp_address(op->nbsp->addresses[i])) {
@@ -6637,12 +6704,12 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
  * constructing their contents based on the OVN_NB database. */
 static void
 build_lflows(struct northd_context *ctx, struct hmap *datapaths,
-             struct hmap *ports, struct hmap *port_groups)
+             struct hmap *ports, struct hmap *port_groups,
+             struct hmap *mcgroups)
 {
     struct hmap lflows = HMAP_INITIALIZER(&lflows);
-    struct hmap mcgroups = HMAP_INITIALIZER(&mcgroups);
 
-    build_lswitch_flows(datapaths, ports, port_groups, &lflows, &mcgroups);
+    build_lswitch_flows(datapaths, ports, port_groups, &lflows, mcgroups);
     build_lrouter_flows(datapaths, ports, &lflows);
 
     /* Push changes to the Logical_Flow table to database. */
@@ -6717,24 +6784,23 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
 
         struct multicast_group group = { .name = sbmc->name,
                                          .key = sbmc->tunnel_key };
-        struct ovn_multicast *mc = ovn_multicast_find(&mcgroups, od, &group);
+        struct ovn_multicast *mc = ovn_multicast_find(mcgroups, od, &group);
         if (mc) {
             ovn_multicast_update_sbrec(mc, sbmc);
-            ovn_multicast_destroy(&mcgroups, mc);
+            ovn_multicast_destroy(mcgroups, mc);
         } else {
             sbrec_multicast_group_delete(sbmc);
         }
     }
     struct ovn_multicast *mc, *next_mc;
-    HMAP_FOR_EACH_SAFE (mc, next_mc, hmap_node, &mcgroups) {
+    HMAP_FOR_EACH_SAFE (mc, next_mc, hmap_node, mcgroups) {
         sbmc = sbrec_multicast_group_insert(ctx->ovnsb_txn);
         sbrec_multicast_group_set_datapath(sbmc, mc->datapath->sb);
         sbrec_multicast_group_set_name(sbmc, mc->group->name);
         sbrec_multicast_group_set_tunnel_key(sbmc, mc->group->key);
         ovn_multicast_update_sbrec(mc, sbmc);
-        ovn_multicast_destroy(&mcgroups, mc);
+        ovn_multicast_destroy(mcgroups, mc);
     }
-    hmap_destroy(&mcgroups);
 }
 
 static void
@@ -7131,12 +7197,14 @@ ovnnb_db_run(struct northd_context *ctx,
     if (!ctx->ovnsb_txn || !ctx->ovnnb_txn) {
         return;
     }
-    struct hmap datapaths, ports, port_groups;
+    struct hmap datapaths, ports, port_groups, mcgroups;
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, sbrec_chassis_by_name, &datapaths, &ports);
     build_ipam(&datapaths, &ports);
     build_port_group_lswitches(ctx, &port_groups, &ports);
-    build_lflows(ctx, &datapaths, &ports, &port_groups);
+    build_multicast(ctx, &ports, &mcgroups);
+    build_lflows(ctx, &datapaths, &ports, &port_groups, &mcgroups);
+    hmap_destroy(&mcgroups);
 
     sync_address_sets(ctx);
     sync_port_groups(ctx);

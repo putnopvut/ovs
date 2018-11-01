@@ -2543,5 +2543,21 @@
       </column>
     </group>
   </table>
+  <table name="Multicast_Group">
+    Multicast Groups are amazing!
+
+    <column name="name">
+      Name of the multicast group.
+    </column>
+
+    <column name="address">
+      The multicast IP address for which the group is being made
+    </column>
+
+    <column name="ports">
+      The logical switch ports to send packets to that are bound for the
+      multicast address.
+    </column>
+  </table>
 
 </database>
