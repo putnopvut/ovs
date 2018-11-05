@@ -11454,3 +11454,74 @@ OVN_CHECK_PACKETS([hv2/vif1-tx.pcap], [expected])
 
 OVN_CLEANUP([hv1],[hv2])
 AT_CLEANUP
+
+AT_SETUP([ovn -- Multicast 1 LS])
+AT_KEYWORDS([multicast])
+ovn_start
+
+# Logical network
+# One logical switch (sw) with 9 ports. We bind
+# the ports across 3 hypervisors.
+# 5 of these ports are added to a multicast group.
+# We then will send a packet and ensure the packet
+# reaches all ports in the group and does not reach
+# ports not in the group.
+
+ovn-nbctl ls-add sw
+net_add n1
+ports=""
+for i in 1 2 3; do
+    sim_add hv$i
+    as hv$i
+    ovs-vsctl add-br br-phys
+    ovn_attach n1 br-phys 192.168.0.$i
+
+    for j in 1 2 3; do
+        ovn-nbctl lsp-add sw lp$i$j
+        ovn-nbctl lsp-set-addresses lp$i$j "00:00:00:00:0$i:0$j 10.0.$i.$j"
+        if test $j = 1 || test $j = 3; then
+            ports="$ports $(ovn-nbctl --bare get Logical_Switch_Port lp$i$j _uuid)"
+        fi
+        ovs-vsctl add-port br-int vif$i$j -- set Interface vif$i$j external-ids:iface-id=lp$i$j options:tx_pcap=hv$i/vif$i$j-tx.pcap options:rxq_pcap=hv$i/vif$i$j-rx.pcap ofport-request=$i$j
+    done
+done
+
+ovn-nbctl --wait=hv create multicast_group name=mg address=239.1.1.1 ports="$ports"
+
+OVN_POPULATE_ARP
+sleep 1
+
+packet="inport==\"lp12\" && eth.src==00:00:00:00:01:02 && eth.dst==01:00:5e:01:01:01 &&
+        ip4 && ip.ttl==64 && ip4.src==10.0.1.2 && ip4.dst == 239.1.1.1 &&
+        udp && udp.src==10000 && udp.dst==20000"
+as hv1 ovs-appctl -t ovn-controller inject-pkt "$packet"
+
+echo $packet | ovstest test-ovn expr-to-packets > expected
+
+OVN_CHECK_PACKETS([hv1/vif11-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv1/vif13-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif21-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif23-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv3/vif31-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv3/vif33-tx.pcap], [expected])
+
+# Now send the packet from a member of the group and ensure the packet reaches all
+# other members of the group.
+
+packet="inport==\"lp11\" && eth.src==00:00:00:00:01:01 && eth.dst==01:00:5e:01:01:01 &&
+        ip4 && ip.ttl==64 && ip4.src==10.0.1.1 && ip4.dst == 239.1.1.1 &&
+        udp && udp.src==10000 && udp.dst==20000"
+as hv1 ovs-appctl -t ovn-controller inject-pkt "$packet"
+
+OVN_CHECK_PACKETS([hv1/vif11-tx.pcap], [expected])
+
+echo $packet | ovstest test-ovn expr-to-packets >> expected
+
+OVN_CHECK_PACKETS([hv1/vif13-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif21-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif23-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv3/vif31-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv3/vif33-tx.pcap], [expected])
+
+OVN_CLEANUP([hv1],[hv2],[hv3])
+AT_CLEANUP
