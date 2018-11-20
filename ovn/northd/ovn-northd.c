@@ -3726,6 +3726,18 @@ build_multicast(struct northd_context *ctx,
             }
 
             ovn_multicast_add(mcgroups, group, op, nb_mcg->address);
+
+            /* If the switch is connected to routers, add the routers' ports to
+             * the multicast group, too.
+             *
+             * XXX this could add the same router port multiple times
+             */
+            size_t j;
+            for (j = 0; j < op->od->n_router_ports; j++) {
+                VLOG_INFO("%s: Adding multicast group for router port %s", op->key, op->od->router_ports[j]->peer->key);
+                ovn_multicast_add(mcgroups, group, op->od->router_ports[j], nb_mcg->address);
+                ovn_multicast_add(mcgroups, group, op->od->router_ports[j]->peer, nb_mcg->address);
+            }
         }
     }
 }
@@ -5113,7 +5125,7 @@ copy_ra_to_sb(struct ovn_port *op, const char *address_mode)
 
 static void
 build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
-                    struct hmap *lflows)
+                    struct hmap *lflows, struct hmap *mcgroups)
 {
     /* This flow table structure is documented in ovn-northd(8), so please
      * update ovn-northd.8.xml if you change anything. */
@@ -5182,7 +5194,6 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
          * source or destination, and zero network source or destination
          * (priority 100). */
         ovn_lflow_add(lflows, od, S_ROUTER_IN_IP_INPUT, 100,
-                      "ip4.mcast || "
                       "ip4.src == 255.255.255.255 || "
                       "ip4.src == 127.0.0.0/8 || "
                       "ip4.dst == 127.0.0.0/8 || "
@@ -6385,6 +6396,33 @@ build_lrouter_flows(struct hmap *datapaths, struct hmap *ports,
         }
     }
 
+    struct ovn_multicast *mc;
+    HMAP_FOR_EACH(mc, hmap_node, mcgroups) {
+        VLOG_INFO("Inspecting multicast %s/%s", mc->group->name, mc->datapath->nbs ? mc->datapath->nbs->name : mc->datapath->nbr->name);
+        if (!mc->datapath->nbr) {
+            continue;
+        }
+
+        ds_clear(&match);
+        ds_put_format(&match, "ip4.dst == "IP_FMT, IP_ARGS(mc->address));
+        ds_clear(&actions);
+        ds_put_format(&actions, "ip.ttl--; "
+                                "reg0 = ip4.dst; ");
+
+        for (int i = 0; i < mc->n_ports; i++) {
+            op = mc->ports[i];
+            ds_put_format(&actions, "eth.src = %s; "
+                                    "outport = %s; "
+                                    "output; ",
+                                    op->lrp_networks.ea_s,
+                                    op->json_key);
+        }
+        ds_chomp(&actions, ' ');
+
+        ovn_lflow_add(lflows, mc->datapath, S_ROUTER_IN_IP_ROUTING, 2000,
+                      ds_cstr(&match), ds_cstr(&actions));
+    }
+
     /* Convert the static routes to flows. */
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (!od->nbr) {
@@ -6710,7 +6748,7 @@ build_lflows(struct northd_context *ctx, struct hmap *datapaths,
     struct hmap lflows = HMAP_INITIALIZER(&lflows);
 
     build_lswitch_flows(datapaths, ports, port_groups, &lflows, mcgroups);
-    build_lrouter_flows(datapaths, ports, &lflows);
+    build_lrouter_flows(datapaths, ports, &lflows, mcgroups);
 
     /* Push changes to the Logical_Flow table to database. */
     const struct sbrec_logical_flow *sbflow, *next_sbflow;

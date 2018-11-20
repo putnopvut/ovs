@@ -11525,3 +11525,77 @@ OVN_CHECK_PACKETS([hv3/vif33-tx.pcap], [expected])
 
 OVN_CLEANUP([hv1],[hv2],[hv3])
 AT_CLEANUP
+
+AT_SETUP([ovn -- Multicast 2 LS 1 LR])
+AT_KEYWORDS([multicast])
+ovn_start
+
+# Logical network
+# Two logical switches (sw1 and sw2) with 2 ports each. These
+# logical switches are connected via a logical router (lr). One port
+# on each of the logical switches is part of a multicast group. We
+# will send a packet and ensure that the packet reaches the ports in
+# the multicast group.
+
+ovn-nbctl lr-add lr
+
+net_add n1
+ports=""
+for i in 1 2; do
+    sim_add hv$i
+    as hv$i
+    ovs-vsctl add-br br-phys
+    ovn_attach n1 br-phys 192.168.0.$i
+
+    ovn-nbctl ls-add sw$i
+    ovn-nbctl lrp-add lr lr-sw$i 00:00:00:00:0$i:00 $i.0.0.0/8
+
+    ovn-nbctl lsp-add sw$i sw$i-lr
+    ovn-nbctl lsp-set-type sw$i-lr router
+    ovn-nbctl lsp-set-addresses sw$i-lr "00:00:00:00:0$i:00 $i.0.0.254"
+    ovn-nbctl lsp-set-options sw$i-lr router-port=lr-sw$i
+
+    for j in 1 2; do
+        ovn-nbctl lsp-add sw$i lp$i$j
+        ovn-nbctl lsp-set-addresses lp$i$j "00:00:00:00:0$i:0$j $i.0.$i.$j"
+        if test $j = 1 ; then
+            ports="$ports $(ovn-nbctl --bare get Logical_Switch_Port lp$i$j _uuid)"
+        fi
+        ovs-vsctl add-port br-int vif$i$j -- set Interface vif$i$j external-ids:iface-id=lp$i$j options:tx_pcap=hv$i/vif$i$j-tx.pcap options:rxq_pcap=hv$i/vif$i$j-rx.pcap ofport-request=$i$j
+    done
+done
+
+ovn-nbctl --wait=hv create multicast_group name=mg address=239.1.1.1 ports="$ports"
+
+OVN_POPULATE_ARP
+sleep 1
+
+echo "Before packet"
+echo "logical flows"
+ovn-sbctl lflow-list
+
+echo "flows"
+as hv1 ovs-ofctl dump-flows br-int
+
+packet="inport==\"lp12\" && eth.src==00:00:00:00:01:02 && eth.dst==01:00:5e:01:01:01 &&
+        ip4 && ip.ttl==64 && ip4.src==1.0.1.2 && ip4.dst == 239.1.1.1 &&
+        udp && udp.src==10000 && udp.dst==20000"
+as hv1 ovs-appctl -t ovn-controller inject-pkt "$packet"
+
+echo $packet | ovstest test-ovn expr-to-packets > expected
+
+# The packet that goes across the router will have an updated eth source and will
+# have TTL decremented
+packet2="eth.src==00:00:00:00:02:00 && eth.dst==01:00:5e:01:01:01 &&
+        ip4 && ip.ttl==63 && ip4.src==1.0.1.2 && ip4.dst == 239.1.1.1 &&
+        udp && udp.src==10000 && udp.dst==20000"
+echo $packet2 | ovstest test-ovn expr-to-packets > expected2
+
+echo "After packet"
+as hv1 ovs-ofctl dump-flows br-int | grep -E 'n_packets=1|n_packets=2|n_packets=3|n_packets=4'
+
+OVN_CHECK_PACKETS([hv1/vif11-tx.pcap], [expected])
+OVN_CHECK_PACKETS([hv2/vif21-tx.pcap], [expected2])
+
+OVN_CLEANUP([hv1],[hv2])
+AT_CLEANUP
