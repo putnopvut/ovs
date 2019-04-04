@@ -3474,4 +3474,27 @@ tcp.flags = RST;
       </column>
     </group>
   </table>
+  <table name="IGMP_Group">
+    <p>
+      Description of IGMP Group.
+    </p>
+
+    <column name="address">
+      <p>
+        Destination IPv4 address for the IGMP group
+      </p>
+    </column>
+
+    <column name="datapath">
+      <p>
+        Datapath to which this IGMP group belongs
+      </p>
+    </column>
+
+    <column name="multicast_group">
+      <p>
+        The multicast group containing destination port bindings
+      </p>
+    </column>
+  </table>
 </database>

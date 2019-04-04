@@ -1,7 +1,7 @@
 {
     "name": "OVN_Southbound",
-    "version": "2.3.0",
-    "cksum": "3092285199 17409",
+    "version": "2.4.0",
+    "cksum": "14018586 18044",
     "tables": {
         "SB_Global": {
             "columns": {
@@ -348,5 +348,16 @@
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
-            "indexes": [["name"]],
+            "indexes": [["name"]]},
+        "IGMP_Group": {
+            "columns": {
+                "address": {"type": "string"},
+                "datapath": {"type": {"key": {"type": "uuid",
+                                              "refTable": "Datapath_Binding"},
+                                              "min": 0,
+                                              "max": 1}},
+                "multicast_group": {"type": {"key": {"type": "uuid",
+                                                     "refTable": "Multicast_Group"},
+                                                     "min": 0,
+                                                     "max": 1}}},
             "isRoot": true}}}

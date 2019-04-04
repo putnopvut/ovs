@@ -37,6 +37,7 @@
 #include "openvswitch/ofp-switch.h"
 #include "openvswitch/ofp-util.h"
 #include "openvswitch/vlog.h"
+#include "mcast-snooping.h"
 
 #include "lib/dhcp.h"
 #include "ovn-controller.h"
@@ -136,6 +137,8 @@ static struct ovs_mutex pinctrl_mutex = OVS_MUTEX_INITIALIZER;
 static struct seq *pinctrl_handler_seq;
 static struct seq *pinctrl_main_seq;
 
+static struct mcast_snooping *ms;
+
 static void *pinctrl_handler(void *arg);
 
 struct pinctrl {
@@ -228,6 +231,7 @@ pinctrl_init(void)
     init_send_garps();
     init_ipv6_ras();
     init_buffered_packets_map();
+    ms = mcast_snooping_create();
     pinctrl.br_int_name = NULL;
     pinctrl_handler_seq = seq_create();
     pinctrl_main_seq = seq_create();
@@ -1273,6 +1277,90 @@ exit:
     dp_packet_uninit(pkt_out_ptr);
 }
 
+static struct hmap igmp_ports;
+
+/* Information needed to look up a port */
+struct igmp_port {
+    struct hmap_node hmap_node;
+    int64_t port_key;
+    int64_t dp_key;
+};
+
+static struct igmp_port *
+lookup_igmp_port(int64_t datapath_key, int64_t port_key, uint32_t hash)
+{
+    struct igmp_port *port;
+    HMAP_FOR_EACH_WITH_HASH (port, hmap_node, hash, &igmp_ports) {
+        if (port->dp_key == datapath_key
+            && port->port_key == port_key) {
+            return port;
+        }
+    }
+    return NULL;
+}
+
+static void
+pinctrl_handle_igmp(struct rconn *swconn OVS_UNUSED, const struct flow *ip_flow,
+                    struct dp_packet *pkt_in,
+                    const struct match *md, struct ofpbuf *userdata OVS_UNUSED)
+{
+    /* This action only works for IP packets, and the switch should only send
+     * us IP packets this way, but check here just to be sure. */
+    if (ip_flow->dl_type != htons(ETH_TYPE_IP)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_WARN_RL(&rl,
+                     "IGMP action on non-IP packet (eth_type 0x%"PRIx16")",
+                     ntohs(ip_flow->dl_type));
+        return;
+    }
+
+    int64_t datapath_key = md->flow.metadata;
+    int64_t port_key = md->flow.regs[MFF_LOG_INPORT - MFF_REG0];
+    uint32_t hash = hash_bytes(&datapath_key, sizeof datapath_key,
+                               hash_bytes(&port_key, sizeof port_key, 0));
+    struct igmp_port *igmp_port = lookup_igmp_port(datapath_key, port_key, hash);
+    if (!igmp_port) {
+        igmp_port = xmalloc(sizeof *igmp_port);
+        hmap_insert(&igmp_ports, &igmp_port->hmap_node, hash);
+        igmp_port->dp_key = datapath_key;
+        igmp_port->port_key = port_key;
+    }
+
+    const struct igmp_header *igmp;
+    size_t offset;
+
+    offset = (char *) dp_packet_l4(pkt_in) - (char *) dp_packet_data(pkt_in);
+    igmp = dp_packet_at(pkt_in, offset, IGMP_HEADER_LEN);
+    if (!igmp || csum(igmp, dp_packet_l4_size(pkt_in)) != 0) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_WARN_RL(&rl, "multicast snooping received bad IGMP checksum");
+        return;
+    }
+
+    ovs_be32 ip4 = ip_flow->igmp_group_ip4;
+
+    switch (ntohs(ip_flow->tp_src)) {
+     /* XXX vlan is hardcoded as 1 for now.
+     */
+    case IGMP_HOST_MEMBERSHIP_REPORT:
+    case IGMPV2_HOST_MEMBERSHIP_REPORT:
+        mcast_snooping_add_group4(ms, ip4, 1, igmp_port);
+        break;
+    case IGMP_HOST_LEAVE_MESSAGE:
+        mcast_snooping_leave_group4(ms, ip4, 1, igmp_port);
+        break;
+    case IGMP_HOST_MEMBERSHIP_QUERY:
+        /* XXX Shouldn't be receiving any of these since we are
+         * the multicast router, right?
+         */
+        mcast_snooping_add_mrouter(ms, 1, igmp_port);
+        break;
+    case IGMPV3_HOST_MEMBERSHIP_REPORT:
+        mcast_snooping_add_report(ms, pkt_in, 1, igmp_port);
+        break;
+    }
+}
+
 static void
 put_be16(struct ofpbuf *buf, ovs_be16 x)
 {
@@ -1346,6 +1434,19 @@ sync_dns_cache(const struct sbrec_dns_table *dns_table)
             free(d);
         }
     }
+}
+
+static void
+sync_mcast(void)
+{
+    /* What needs to happen here?
+     *
+     * This runs in the pinctrl main thread, so it has access to the southbound
+     * database. The biggest thing it needs to do is to take the mcast stuff that
+     * exists in the mcast snooping table and writes it to the southbound database.
+     *
+     * So let's do it.
+     */
 }
 
 static void
@@ -1728,6 +1829,10 @@ process_packet_in(struct rconn *swconn, const struct ofp_header *msg)
         pinctrl_handle_put_icmp4_frag_mtu(swconn, &headers, &packet,
                                           &pin, &userdata, &continuation);
         break;
+    case ACTION_OPCODE_IGMP:
+        pinctrl_handle_igmp(swconn, &headers, &packet, &pin.flow_metadata,
+                            &userdata);
+        break;
 
     default:
         VLOG_WARN_RL(&rl, "unrecognized packet-in opcode %"PRIu32,
@@ -1856,6 +1961,7 @@ pinctrl_handler(void *arg_)
         rconn_recv_wait(swconn);
         send_garp_wait(send_garp_time);
         ipv6_ra_wait(send_ipv6_ra_time);
+        mcast_snooping_wait(ms);
 
         new_seq = seq_read(pinctrl_handler_seq);
         seq_wait(pinctrl_handler_seq, new_seq);
@@ -1903,6 +2009,7 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     prepare_ipv6_ras(sbrec_port_binding_by_datapath,
                      sbrec_port_binding_by_name, local_datapaths);
     sync_dns_cache(dns_table);
+    sync_mcast();
     ovs_mutex_unlock(&pinctrl_mutex);
 }
 
