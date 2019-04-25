@@ -107,6 +107,11 @@
         Configure a given OUI to be used as prefix when L2 address is
         dynamically assigned, e.g. <code>00:11:22</code>
       </column>
+
+      <column name="options" key="controller_event" type='{"type": "boolean"}'>
+        Value used to enable/disable ovn-controller event reporting to the CMS.
+        Please see the <ref table="Controller_Event"/> table in SBDB.
+      </column>
     </group>
 
     <group title="Connection Options">

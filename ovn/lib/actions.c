@@ -38,6 +38,8 @@
 #include "packets.h"
 #include "openvswitch/shash.h"
 #include "simap.h"
+#include "uuid.h"
+#include "socket-util.h"
 
 VLOG_DEFINE_THIS_MODULE(actions);
 
@@ -1196,6 +1198,145 @@ parse_CLONE(struct action_context *ctx)
 }
 
 static void
+parse_gen_opt(struct action_context *ctx, struct ovnact_gen_option *o,
+              const struct hmap *gen_opts, const char *opts_type)
+{
+    if (ctx->lexer->token.type != LEX_T_ID) {
+        lexer_syntax_error(ctx->lexer, NULL);
+        return;
+    }
+
+    o->option = gen_opts ? gen_opts_find(gen_opts, ctx->lexer->token.s) : NULL;
+    if (!o->option) {
+        lexer_syntax_error(ctx->lexer, "expecting %s option name", opts_type);
+        return;
+    }
+    lexer_get(ctx->lexer);
+
+    if (!lexer_force_match(ctx->lexer, LEX_T_EQUALS)) {
+        return;
+    }
+
+    if (!expr_constant_set_parse(ctx->lexer, &o->value)) {
+        memset(&o->value, 0, sizeof o->value);
+        return;
+    }
+
+    if (!strcmp(o->option->type, "str")) {
+        if (o->value.type != EXPR_C_STRING) {
+            lexer_error(ctx->lexer, "%s option %s requires string value.",
+                        opts_type, o->option->name);
+            return;
+        }
+    } else {
+        if (o->value.type != EXPR_C_INTEGER) {
+            lexer_error(ctx->lexer, "%s option %s requires numeric value.",
+                        opts_type, o->option->name);
+            return;
+        }
+    }
+}
+
+static void
+validate_empty_lb_backends(struct action_context *ctx,
+                           const struct ovnact_gen_option *options,
+                           size_t n_options)
+{
+    for (const struct ovnact_gen_option *o = options;
+         o < &options[n_options]; o++) {
+        const union expr_constant *c = o->value.values;
+        struct sockaddr_storage ss;
+        struct uuid uuid;
+
+        if (o->value.n_values > 1 || !c->string) {
+            lexer_error(ctx->lexer, "Invalid value for \"%s\" option",
+                        o->option->name);
+            return;
+        }
+
+        switch (o->option->code) {
+        case EMPTY_LB_VIP:
+            if (!inet_parse_active(c->string, 0, &ss, false)) {
+                lexer_error(ctx->lexer, "Invalid load balancer VIP '%s'", c->string);
+                return;
+            }
+            break;
+        case EMPTY_LB_PROTOCOL:
+            if (strcmp(c->string, "tcp") && strcmp(c->string, "udp")) {
+                lexer_error(ctx->lexer, "Load balancer protocol '%s' is not 'tcp' or 'udp'", c->string);
+                return;
+            }
+            break;
+        case EMPTY_LB_LOAD_BALANCER:
+            if (!uuid_from_string(&uuid, c->string)) {
+                lexer_error(ctx->lexer, "Load balancer '%s' is not a UUID", c->string);
+                return;
+            }
+            break;
+        }
+    }
+}
+
+static void
+parse_send_event(struct action_context *ctx, struct ovnact_controller_event *event)
+{
+    int event_type = 0;
+
+    lexer_force_match(ctx->lexer, LEX_T_LPAREN);
+
+    /* Event type must be listed first */
+    if (!lexer_match_id(ctx->lexer, "event")) {
+        lexer_syntax_error(ctx->lexer, "Expecting 'event' option");
+        return;
+    }
+    if (!lexer_force_match(ctx->lexer, LEX_T_EQUALS)) {
+        return;
+    }
+    if (!lexer_force_int(ctx->lexer, &event_type)) {
+        return;
+    }
+
+    if (event_type < 0 || event_type >= OVN_EVENT_MAX) {
+        lexer_syntax_error(ctx->lexer, "Unknown event '%d'", event_type);
+        return;
+    }
+
+    event->event_type = event_type;
+    lexer_match(ctx->lexer, LEX_T_COMMA);
+
+    size_t allocated_options = 0;
+    while (!lexer_match(ctx->lexer, LEX_T_RPAREN)) {
+        if (event->n_options >= allocated_options) {
+            event->options = x2nrealloc(event->options, &allocated_options,
+                                     sizeof *event->options);
+        }
+
+        struct ovnact_gen_option *o = &event->options[event->n_options++];
+        memset(o, 0, sizeof *o);
+        parse_gen_opt(ctx, o, &ctx->pp->controller_event_opts->event_opts[event_type],
+                      event_to_string(event_type));
+        if (ctx->lexer->error) {
+            return;
+        }
+
+        lexer_match(ctx->lexer, LEX_T_COMMA);
+    }
+
+    switch (event_type) {
+    case OVN_EVENT_EMPTY_LB_BACKENDS:
+        validate_empty_lb_backends(ctx, event->options, event->n_options);
+        break;
+    default:
+        OVS_NOT_REACHED();
+    }
+}
+
+static void
+ovnact_controller_event_free(struct ovnact_controller_event *event OVS_UNUSED)
+{
+}
+
+static void
 format_nested_action(const struct ovnact_nest *on, const char *name,
                      struct ds *s)
 {
@@ -1256,6 +1397,20 @@ static void
 format_CLONE(const struct ovnact_nest *nest, struct ds *s)
 {
     format_nested_action(nest, "clone", s);
+}
+
+static void
+format_SEND_EVENT(const struct ovnact_controller_event *event,
+                  struct ds *s)
+{
+    ds_put_format(s, "send_event(event = %d", event->event_type);
+    for (const struct ovnact_gen_option *o = event->options;
+         o < &event->options[event->n_options]; o++) {
+        ds_put_cstr(s, ", ");
+        ds_put_format(s, "%s = ", o->option->name);
+        expr_constant_set_format(&o->value, s);
+    }
+    ds_put_cstr(s, ");");
 }
 
 static void
@@ -1360,6 +1515,52 @@ encode_CLONE(const struct ovnact_nest *on,
     ofpacts->header = clone;
     ofpact_finish_CLONE(ofpacts, &clone);
 }
+
+static void
+encode_event_empty_lb_backends_opts(struct ofpbuf *ofpacts,
+                                    const struct ovnact_controller_event *event)
+{
+    for (const struct ovnact_gen_option *o = event->options;
+         o < &event->options[event->n_options]; o++) {
+        struct controller_event_opt_header *hdr = ofpbuf_put_uninit(ofpacts, sizeof *hdr);
+        const union expr_constant *c = o->value.values;
+        size_t size;
+        hdr->opt_code = htons(o->option->code);
+        if (!strcmp(o->option->type, "str")) {
+            size = strlen(c->string);
+            hdr->size = htons(size);
+            ofpbuf_put(ofpacts, c->string, size);
+        } else {
+            /* All empty_lb_backends fields are of type 'str' */
+            OVS_NOT_REACHED();
+        }
+    }
+}
+
+static void
+encode_SEND_EVENT(const struct ovnact_controller_event *event,
+                  const struct ovnact_encode_params *ep OVS_UNUSED,
+                  struct ofpbuf *ofpacts)
+{
+    size_t oc_offset;
+
+    oc_offset = encode_start_controller_op(ACTION_OPCODE_EVENT, false,
+                                           NX_CTLR_NO_METER, ofpacts);
+    ovs_be32 ofs = htonl(event->event_type);
+    ofpbuf_put(ofpacts, &ofs, sizeof ofs);
+
+    switch (event->event_type) {
+    case OVN_EVENT_EMPTY_LB_BACKENDS:
+        encode_event_empty_lb_backends_opts(ofpacts, event);
+        break;
+    case OVN_EVENT_MAX:
+    default:
+        OVS_NOT_REACHED();
+    }
+
+    encode_finish_controller_op(oc_offset, ofpacts);
+}
+
 
 static void
 ovnact_nest_free(struct ovnact_nest *on)
@@ -1515,45 +1716,6 @@ ovnact_put_mac_bind_free(struct ovnact_put_mac_bind *put_mac OVS_UNUSED)
 {
 }
 
-static void
-parse_gen_opt(struct action_context *ctx, struct ovnact_gen_option *o,
-              const struct hmap *gen_opts, const char *opts_type)
-{
-    if (ctx->lexer->token.type != LEX_T_ID) {
-        lexer_syntax_error(ctx->lexer, NULL);
-        return;
-    }
-
-    o->option = gen_opts ? gen_opts_find(gen_opts, ctx->lexer->token.s) : NULL;
-    if (!o->option) {
-        lexer_syntax_error(ctx->lexer, "expecting %s option name", opts_type);
-        return;
-    }
-    lexer_get(ctx->lexer);
-
-    if (!lexer_force_match(ctx->lexer, LEX_T_EQUALS)) {
-        return;
-    }
-
-    if (!expr_constant_set_parse(ctx->lexer, &o->value)) {
-        memset(&o->value, 0, sizeof o->value);
-        return;
-    }
-
-    if (!strcmp(o->option->type, "str")) {
-        if (o->value.type != EXPR_C_STRING) {
-            lexer_error(ctx->lexer, "%s option %s requires string value.",
-                        opts_type, o->option->name);
-            return;
-        }
-    } else {
-        if (o->value.type != EXPR_C_INTEGER) {
-            lexer_error(ctx->lexer, "%s option %s requires numeric value.",
-                        opts_type, o->option->name);
-            return;
-        }
-    }
-}
 
 static const struct ovnact_gen_option *
 find_offerip(const struct ovnact_gen_option *options, size_t n)
@@ -2511,6 +2673,8 @@ parse_action(struct action_context *ctx)
         parse_LOG(ctx);
     } else if (lexer_match_id(ctx->lexer, "set_meter")) {
         parse_set_meter_action(ctx);
+    } else if (lexer_match_id(ctx->lexer, "send_event")) {
+        parse_send_event(ctx, ovnact_put_SEND_EVENT(ctx->ovnacts));
     } else {
         lexer_syntax_error(ctx->lexer, "expecting action");
     }

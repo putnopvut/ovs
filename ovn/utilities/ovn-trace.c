@@ -2131,6 +2131,9 @@ trace_actions(const struct ovnact *ovnacts, size_t ovnacts_len,
                               pipeline, super);
             break;
 
+        case OVNACT_SEND_EVENT:
+            break;
+
         case OVNACT_OVNFIELD_LOAD:
             execute_ovnfield_load(ovnact_get_OVNFIELD_LOAD(a), super);
             break;

@@ -765,6 +765,7 @@ main(int argc, char *argv[])
                                 sbrec_port_binding_by_name,
                                 sbrec_mac_binding_by_lport_ip,
                                 sbrec_dns_table_get(ovnsb_idl_loop.idl),
+                                sbrec_controller_event_table_get(ovnsb_idl_loop.idl),
                                 br_int, chassis,
                                 &local_datapaths, &active_tunnels);
                     update_ct_zones(&local_lports, &local_datapaths, &ct_zones,

@@ -163,6 +163,7 @@ static void run_put_mac_bindings(
     struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip)
     OVS_REQUIRES(pinctrl_mutex);
 static void wait_put_mac_bindings(struct ovsdb_idl_txn *ovnsb_idl_txn);
+static void wait_controller_event(struct ovsdb_idl_txn *ovnsb_idl_txn);
 static void flush_put_mac_bindings(void);
 static void buffer_put_mac_bindings(void);
 static void destroy_buffered_mac_bindings(void);
@@ -205,6 +206,7 @@ static void pinctrl_handle_put_icmp4_frag_mtu(struct rconn *swconn,
                                               struct ofputil_packet_in *pin,
                                               struct ofpbuf *userdata,
                                               struct ofpbuf *continuation);
+static void pinctrl_handle_event(struct ofpbuf *userdata);
 static void init_ipv6_ras(void);
 static void destroy_ipv6_ras(void);
 static void ipv6_ra_wait(long long int send_ipv6_ra_time);
@@ -220,6 +222,130 @@ static bool may_inject_pkts(void);
 
 COVERAGE_DEFINE(pinctrl_drop_put_mac_binding);
 COVERAGE_DEFINE(pinctrl_drop_buffered_packets_map);
+COVERAGE_DEFINE(pinctrl_drop_controller_event);
+
+struct empty_lb_backends_event {
+    struct hmap_node hmap_node;
+    char *vip;
+    char *protocol;
+    char *load_balancer;
+};
+
+static struct hmap event_table[OVN_EVENT_MAX];
+
+static void init_event_table(void)
+{
+    for (size_t i = 0; i < OVN_EVENT_MAX; i++) {
+        hmap_init(&event_table[i]);
+    }
+}
+
+static void
+empty_lb_backends_event_flush(void)
+{
+    struct empty_lb_backends_event *ce;
+    HMAP_FOR_EACH_POP (ce, hmap_node,
+                       &event_table[OVN_EVENT_EMPTY_LB_BACKENDS]) {
+        free(ce->vip);
+        free(ce->protocol);
+        free(ce->load_balancer);
+        free(ce);
+    }
+}
+
+static void event_table_flush(void)
+{
+    empty_lb_backends_event_flush();
+}
+
+static void event_table_destroy(void)
+{
+    event_table_flush();
+    for (size_t i = 0; i < OVN_EVENT_MAX; i++) {
+        hmap_destroy(&event_table[i]);
+    }
+}
+
+static struct empty_lb_backends_event *
+pinctrl_find_empty_lb_backends_event(char *vip, char *protocol,
+                                     char *load_balancer, uint32_t hash)
+{
+    struct empty_lb_backends_event *ce;
+    HMAP_FOR_EACH_WITH_HASH (ce, hmap_node, hash,
+                             &event_table[OVN_EVENT_EMPTY_LB_BACKENDS]) {
+        if (!strcmp(ce->vip, vip) &&
+            !strcmp(ce->protocol, protocol) &&
+            !strcmp(ce->load_balancer, load_balancer)) {
+            return ce;
+        }
+    }
+    return NULL;
+}
+
+static const struct sbrec_controller_event *
+empty_lb_backends_lookup(struct empty_lb_backends_event *event,
+                         const struct sbrec_controller_event_table *ce_table)
+{
+    const struct sbrec_controller_event *sbrec_event;
+    const char *event_type = event_to_string(OVN_EVENT_EMPTY_LB_BACKENDS);
+    SBREC_CONTROLLER_EVENT_TABLE_FOR_EACH (sbrec_event, ce_table) {
+        if (strcmp(sbrec_event->event_type, event_type)) {
+            continue;
+        }
+
+        const char *vip = smap_get(&sbrec_event->event_info, "vip");
+        const char *protocol = smap_get(&sbrec_event->event_info, "protocol");
+        const char *load_balancer = smap_get(&sbrec_event->event_info,
+                                             "load_balancer");
+
+        if (!strcmp(event->vip, vip) &&
+            !strcmp(event->protocol, protocol) &&
+            !strcmp(event->load_balancer, load_balancer)) {
+            return sbrec_event;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+controller_event_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
+                     const struct sbrec_controller_event_table *ce_table)
+{
+    if (!ovnsb_idl_txn) {
+        return;
+    }
+
+    struct empty_lb_backends_event *empty_lbs;
+    HMAP_FOR_EACH (empty_lbs, hmap_node, &event_table[OVN_EVENT_EMPTY_LB_BACKENDS]) {
+        const struct sbrec_controller_event *event;
+
+        event = empty_lb_backends_lookup(empty_lbs, ce_table);
+        if (!event) {
+            struct smap event_info = SMAP_INITIALIZER(&event_info);
+
+            smap_add(&event_info, "vip", empty_lbs->vip);
+            smap_add(&event_info, "protocol", empty_lbs->protocol);
+            smap_add(&event_info, "load_balancer", empty_lbs->load_balancer);
+
+            event = sbrec_controller_event_insert(ovnsb_idl_txn);
+            sbrec_controller_event_set_event_type(event,
+                                             event_to_string(OVN_EVENT_EMPTY_LB_BACKENDS));
+            sbrec_controller_event_set_event_info(event, &event_info);
+            sbrec_controller_event_set_handled(event, false);
+        }
+    }
+    event_table_flush();
+
+    const struct sbrec_controller_event *cur_event, *next_event;
+    /* flush 'handled' rows */
+    SBREC_CONTROLLER_EVENT_TABLE_FOR_EACH_SAFE(cur_event, next_event,
+                                               ce_table) {
+        if (cur_event->handled) {
+            sbrec_controller_event_delete(cur_event);
+        }
+    }
+}
 
 void
 pinctrl_init(void)
@@ -228,6 +354,7 @@ pinctrl_init(void)
     init_send_garps();
     init_ipv6_ras();
     init_buffered_packets_map();
+    init_event_table();
     pinctrl.br_int_name = NULL;
     pinctrl_handler_seq = seq_create();
     pinctrl_main_seq = seq_create();
@@ -1727,6 +1854,10 @@ process_packet_in(struct rconn *swconn, const struct ofp_header *msg)
     case ACTION_OPCODE_PUT_ICMP4_FRAG_MTU:
         pinctrl_handle_put_icmp4_frag_mtu(swconn, &headers, &packet,
                                           &pin, &userdata, &continuation);
+    case ACTION_OPCODE_EVENT:
+        ovs_mutex_lock(&pinctrl_mutex);
+        pinctrl_handle_event(&userdata);
+        ovs_mutex_unlock(&pinctrl_mutex);
         break;
 
     default:
@@ -1878,6 +2009,7 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
             struct ovsdb_idl_index *sbrec_port_binding_by_name,
             struct ovsdb_idl_index *sbrec_mac_binding_by_lport_ip,
             const struct sbrec_dns_table *dns_table,
+            const struct sbrec_controller_event_table *ce_table,
             const struct ovsrec_bridge *br_int,
             const struct sbrec_chassis *chassis,
             const struct hmap *local_datapaths,
@@ -1903,6 +2035,7 @@ pinctrl_run(struct ovsdb_idl_txn *ovnsb_idl_txn,
     prepare_ipv6_ras(sbrec_port_binding_by_datapath,
                      sbrec_port_binding_by_name, local_datapaths);
     sync_dns_cache(dns_table);
+    controller_event_run(ovnsb_idl_txn, ce_table);
     ovs_mutex_unlock(&pinctrl_mutex);
 }
 
@@ -2233,6 +2366,7 @@ void
 pinctrl_wait(struct ovsdb_idl_txn *ovnsb_idl_txn)
 {
     wait_put_mac_bindings(ovnsb_idl_txn);
+    wait_controller_event(ovnsb_idl_txn);
     int64_t new_seq = seq_read(pinctrl_main_seq);
     seq_wait(pinctrl_main_seq, new_seq);
 }
@@ -2248,6 +2382,7 @@ pinctrl_destroy(void)
     destroy_send_garps();
     destroy_ipv6_ras();
     destroy_buffered_packets_map();
+    event_table_destroy();
     destroy_put_mac_bindings();
     destroy_buffered_mac_bindings();
     destroy_dns_cache();
@@ -2487,6 +2622,21 @@ wait_put_mac_bindings(struct ovsdb_idl_txn *ovnsb_idl_txn)
 {
     if (ovnsb_idl_txn && !hmap_is_empty(&put_mac_bindings)) {
         poll_immediate_wake();
+    }
+}
+
+static void
+wait_controller_event(struct ovsdb_idl_txn *ovnsb_idl_txn)
+{
+    if (!ovnsb_idl_txn) {
+        return;
+    }
+
+    for (size_t i = 0; i < OVN_EVENT_MAX; i++) {
+        if (!hmap_is_empty(&event_table[i])) {
+            poll_immediate_wake();
+            break;
+        }
     }
 }
 
@@ -3265,5 +3415,82 @@ exit:
     queue_msg(swconn, ofputil_encode_resume(pin, continuation, proto));
     if (pkt_out) {
         dp_packet_delete(pkt_out);
+    }
+}
+
+static bool
+pinctrl_handle_empty_lb_backends_opts(struct ofpbuf *userdata)
+{
+    struct controller_event_opt_header *userdata_opt;
+    uint32_t hash = 0;
+    char *vip = NULL;
+    char *protocol = NULL;
+    char *load_balancer = NULL;
+
+    while (userdata->size) {
+        userdata_opt = ofpbuf_try_pull(userdata, sizeof *userdata_opt);
+        if (!userdata_opt) {
+            return false;
+        }
+        size_t size = ntohs(userdata_opt->size);
+        char *userdata_opt_data = ofpbuf_try_pull(userdata, size);
+        if (!userdata_opt_data) {
+            return false;
+        }
+        switch (ntohs(userdata_opt->opt_code)) {
+        case EMPTY_LB_VIP:
+            vip = xmemdup0(userdata_opt_data, size);
+            break;
+        case EMPTY_LB_PROTOCOL:
+            protocol = xmemdup0(userdata_opt_data, size);
+            break;
+        case EMPTY_LB_LOAD_BALANCER:
+            load_balancer = xmemdup0(userdata_opt_data, size);
+            break;
+        default:
+            OVS_NOT_REACHED();
+        }
+        hash = hash_bytes(userdata_opt_data, size, hash);
+    }
+    ovs_assert(vip && protocol && load_balancer);
+
+    struct empty_lb_backends_event *event;
+
+    event = pinctrl_find_empty_lb_backends_event(vip, protocol,
+                                                 load_balancer, hash);
+    if (!event) {
+        event = xzalloc(sizeof *event);
+        hmap_insert(&event_table[OVN_EVENT_EMPTY_LB_BACKENDS],
+                    &event->hmap_node, hash);
+        event->vip = vip;
+        event->protocol = protocol;
+        event->load_balancer = load_balancer;
+        notify_pinctrl_main();
+    } else {
+        free(vip);
+        free(protocol);
+        free(load_balancer);
+    }
+    return true;
+}
+
+static void
+pinctrl_handle_event(struct ofpbuf *userdata)
+{
+    ovs_be32 *pevent;
+
+    pevent = ofpbuf_try_pull(userdata, sizeof *pevent);
+    if (!pevent) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
+        VLOG_WARN_RL(&rl, "event not present in the userdata");
+        return;
+    }
+
+    switch (ntohl(*pevent)) {
+    case OVN_EVENT_EMPTY_LB_BACKENDS:
+        pinctrl_handle_empty_lb_backends_opts(userdata);
+        break;
+    default:
+        return;
     }
 }

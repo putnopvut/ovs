@@ -3474,4 +3474,37 @@ tcp.flags = RST;
       </column>
     </group>
   </table>
+  <table name="Controller_Event" title="Controller Event table">
+    <p>
+      Database table used by ovn-controller to report CMS related
+      events
+    </p>
+    <column name="event_type"
+            type='{"type": "string", "enum": ["set", ["empty_lb_backends"]]}'>
+      Event type occurred
+    </column>
+    <column name="event_info">
+    <p>
+      Key-value pairs used to spcify evento info to the CMS.
+      Possible values are:
+    </p>
+      <ul>
+        <li>
+         <code>vip</code>: VIP reported for the <code>empty_lb_backends</code>
+         event
+        </li>
+        <li>
+          <code>protocol</code>: Transport protocol reported for the
+          <code>empty_lb_backends</code> event
+        </li>
+        <li>
+          <code>load_balancer</code>: UUID fo the load balancer reported for
+          the <code>empty_lb_backends</code> event
+        </li>
+      </ul>
+    </column>
+    <column name="handled" type='{"type": "boolean"}'>
+      Value used to indicate if the event has been consumed by the CMS
+    </column>
+  </table>
 </database>
